@@ -1,0 +1,98 @@
+server:
+  port: ${PORT}
+  servlet:
+    context-path: /api
+
+spring:
+  application:
+    name: isoproject
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+      indent-output: true
+    deserialization:
+      fail-on-unknown-properties: false
+
+atm:
+  server:
+    port: ${ATM_SERVER_PORT}
+    threads: 20
+    socket:
+      timeout: 300000
+
+esb:
+  base-url: ${BASE_URL}
+  withdrawal: ${WITHDRAWAL}
+  deposit: ${DEPOSIT}
+  transfer: ${TRANSFER}
+  balance-inquiry: ${BALANCE_INQUIRY}
+  mini-statement: ${MINI_STATEMENT}
+  connection-timeout: 60000
+  read-timeout: 60000
+  username: ${ESB_USERNAME}
+  password: ${ESB_PASSWORD}
+  ssl:
+    verify: ${ESB_SSL_VERIFY:false}
+
+  codes:
+    SUCCESS: "00"
+    INSUFFICIENT_FUNDS: "51"
+    INVALID_ACCOUNT: "14"
+    INVALID_PIN: "55"
+    LIMIT_EXCEEDED: "61"
+    TIMEOUT: "68"
+    SYSTEM_ERROR: "96"
+
+feign:
+  client:
+    config:
+      default:
+        connectTimeout: 60000
+        readTimeout: 60000
+        loggerLevel: full
+      esb-client:
+        connectTimeout: 60000
+        readTimeout: 60000
+        loggerLevel: full
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+
+logging:
+  level:
+    root: INFO
+    com.pridebank.token: DEBUG
+    feign: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"
+
+---
+spring:
+  config:
+    activate:
+      on-profile: dev
+
+logging:
+  level:
+    root: DEBUG
+    com.pridebank.token: DEBUG
+    feign: DEBUG
+
+feign:
+  client:
+    config:
+      esb-client:
+        loggerLevel: full
+
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
