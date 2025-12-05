@@ -7,7 +7,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
+//import java.math.RoundingMode;
 import java.text.SimpleDateFormat;
 import java.util.Base64;
 import java.util.Date;
@@ -18,7 +18,7 @@ public class IsoToJsonConverter {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final SimpleDateFormat isoDt = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX");
-    private final SimpleDateFormat timeOnly = new SimpleDateFormat("HHmmss");
+//    private final SimpleDateFormat timeOnly = new SimpleDateFormat("HHmmss");
 
     public String convert(IsoMessage isoMessage) throws Exception {
         ObjectNode json = objectMapper.createObjectNode();
@@ -42,8 +42,9 @@ public class IsoToJsonConverter {
         }
         if (isoMessage.hasField(4)) {
             String amountStr = toStringSafe(isoMessage.getObjectValue(4));
-            json.put("amountMinor", amountStr);
-            json.put("amount", parseAmount(amountStr).toString());
+//            json.put("amountMinor", amountStr);
+            json.put("amount", amountStr);
+            json.put("amountValue", parseAmount(amountStr).toString());
             raw.put("4", amountStr);
         }
         if (isoMessage.hasField(7)) {
@@ -145,9 +146,13 @@ public class IsoToJsonConverter {
 
     // helpers
     private BigDecimal parseAmount(String amountStr) {
+        log.info("Incoming Amount ::: {}", amountStr);
         if (amountStr == null || amountStr.isBlank()) return BigDecimal.ZERO;
         long cents = Long.parseLong(amountStr.trim());
-        return BigDecimal.valueOf(cents).divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
+        log.info("Cents value ::: {}", cents);
+//        return BigDecimal.valueOf(cents).divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP); returning decimals for cents
+//        return BigDecimal.valueOf(cents).divide(BigDecimal.valueOf(100), 0, RoundingMode.HALF_UP);
+        return BigDecimal.valueOf(cents);
     }
 
     private String maskPan(String pan) {

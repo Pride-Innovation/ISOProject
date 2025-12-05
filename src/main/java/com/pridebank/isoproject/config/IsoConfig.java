@@ -68,7 +68,8 @@ public class IsoConfig {
         map.put(39, new AlphaParseInfo(2));
         map.put(41, new AlphaParseInfo(8));
         map.put(42, new AlphaParseInfo(15));
-        map.put(43, new LllvarParseInfo());          // free text length 40 -> LLLVAR to be safe
+//        map.put(43, new LllvarParseInfo());          // free text length 40 -> LLLVAR to be safe
+        map.put(43, new AlphaParseInfo(40));
         map.put(44, new LlvarParseInfo());
         map.put(49, new NumericParseInfo(3));
         map.put(54, new LllvarParseInfo());
