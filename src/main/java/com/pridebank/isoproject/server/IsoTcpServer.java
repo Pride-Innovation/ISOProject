@@ -233,7 +233,7 @@ public class IsoTcpServer {
                                             if (cls.toUpperCase().contains("BINARY") || cls.toUpperCase().contains("IFB_BINARY") || cls.toUpperCase().contains("IFA_BINARY")) {
                                                 String s = (String) val;
                                                 if (s.matches("(?i)^[0-9A-F]+$") && (s.length() % 2 == 0)) {
-                                                    int len = s.length() / 2;
+//                                                    int len = s.length() / 2;
                                                     byte[] b = hexToBytes(s);
                                                     jmsg.set(i, b);
                                                     continue;
@@ -306,7 +306,7 @@ public class IsoTcpServer {
         try {
             int typeInt = response.getType();
             // solab type is numeric (e.g. 0x200) - convert to decimal MTI string
-            String mtiStr = String.format("%04d", typeInt);
+//            String mtiStr = String.format("%04d", typeInt);
             // solab type is numeric (e.g. 0x200) - convert to 4-digit HEX MTI string ("0200", "0210", "0800", "0810")
             jmsg.setMTI(String.format("%04X", typeInt));
         } catch (Throwable ignore) {
