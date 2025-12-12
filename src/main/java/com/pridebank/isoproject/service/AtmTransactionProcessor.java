@@ -24,14 +24,36 @@ public class AtmTransactionProcessor {
         String stan = (isoRequest != null && isoRequest.hasField(11)) ?
                 isoRequest.getObjectValue(11).toString() : "unknown";
 
-        IsoValidator.ValidationResult vr = isoValidator.validate0200(isoRequest);
-        if (!vr.isValid()) {
-            log.warn("Validation failed - STAN: {} - {}", stan, vr.summary());
-            return createErrorResponse(isoRequest, "30", truncate(vr.summary()));
+        // Bypass 0200 validator for network (0800) and reversal (0420)
+        if (isoRequest == null) {
+            return createErrorResponse(null, "96", "Empty request");
         }
 
+        int mti = isoRequest.getType();
         try {
-            assert isoRequest != null;
+            if (mti == 0x800) {
+                log.info("MTI decimal={} hex=0x{} human={} ", mti, Integer.toHexString(mti).toUpperCase(), String.format("%04X", mti));
+                // echo / sign on - field 70 must be echoed or set; prefer request field 70
+                log.info("Iso Data at 70 ::: {}", isoRequest.getObjectValue(70).toString());
+
+                String f70 = isoRequest.hasField(70) ? isoRequest.getObjectValue(70).toString() : "001";
+                log.info("f70 information :::: {}", f70);
+                return isoMessageBuilder.build0810(isoRequest, f70);
+            }
+            if (mti == 0x420) {
+                log.info("MTI decimal={} hex=0x{} human={} ", mti, Integer.toHexString(mti).toUpperCase(), String.format("%04X", mti));
+                // reversal - forward to ESB or create response; apply minimal validation
+                // proceed with normal flow but skip strict 0200 validation
+            } else if (mti == 0x200) {
+                log.info("MTI info decimal={} hex=0x{} human={} ", mti, Integer.toHexString(mti).toUpperCase(), String.format("%04X", mti));
+
+                IsoValidator.ValidationResult vr = isoValidator.validate0200(isoRequest);
+                if (!vr.isValid()) {
+                    log.warn("Validation failed - STAN: {} - {}", stan, vr.summary());
+                    return createErrorResponse(isoRequest, "30", truncate(vr.summary()));
+                }
+            }
+
             String jsonRequest = isoToJsonConverter.convert(isoRequest);
             log.info("Request in JSON Format ::: {}", jsonRequest);
             String jsonResponse = esbGatewayService.sendToEsb(jsonRequest, isoRequest);

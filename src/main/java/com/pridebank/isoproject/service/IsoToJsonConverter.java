@@ -7,7 +7,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
-//import java.math.RoundingMode;
 import java.text.SimpleDateFormat;
 import java.util.Base64;
 import java.util.Date;
@@ -18,7 +17,6 @@ public class IsoToJsonConverter {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final SimpleDateFormat isoDt = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX");
-//    private final SimpleDateFormat timeOnly = new SimpleDateFormat("HHmmss");
 
     public String convert(IsoMessage isoMessage) throws Exception {
         ObjectNode json = objectMapper.createObjectNode();
@@ -26,7 +24,6 @@ public class IsoToJsonConverter {
 
         json.put("messageType", String.format("%04d", isoMessage.getType()));
 
-        // helper lambda-like inline logic using methods below
         // common semantic fields
         if (isoMessage.hasField(2)) {
             String pan = toStringSafe(isoMessage.getObjectValue(2));
@@ -42,9 +39,15 @@ public class IsoToJsonConverter {
         }
         if (isoMessage.hasField(4)) {
             String amountStr = toStringSafe(isoMessage.getObjectValue(4));
-//            json.put("amountMinor", amountStr);
-            json.put("amount", amountStr);
-            json.put("amountValue", parseAmount(amountStr).toString());
+            // Prefer sending minor units to ESB to avoid rounding ambiguity
+            json.put("amountMinor", amountStr);
+            try {
+                BigDecimal major = parseAmountToMajor(amountStr);
+                json.put("amount", major.toPlainString());        // major units decimal string
+                json.put("amountValue", major.toPlainString());   // backward compatibility
+            } catch (Exception ex) {
+                log.debug("Unable to parse amountMinor to major: {}", amountStr, ex);
+            }
             raw.put("4", amountStr);
         }
         if (isoMessage.hasField(7)) {
@@ -101,6 +104,7 @@ public class IsoToJsonConverter {
             json.put("currencyCode", toStringSafe(isoMessage.getObjectValue(49)));
             raw.put("49", toStringSafe(isoMessage.getObjectValue(49)));
         }
+
         // balances or long data
         if (isoMessage.hasField(54)) {
             json.put("balanceData", toStringSafe(isoMessage.getObjectValue(54)));
@@ -126,7 +130,7 @@ public class IsoToJsonConverter {
         }
         if (isoMessage.hasField(64)) {
             raw.put("64", bytesToBase64(isoMessage.getObjectValue(64)));
-            json.put("mac", bytesToBase64(isoMessage.getObjectValue(64)));
+            json.put("macBase64", bytesToBase64(isoMessage.getObjectValue(64)));
         }
 
         // capture any remaining fields into a rawFields object
@@ -145,14 +149,10 @@ public class IsoToJsonConverter {
     }
 
     // helpers
-    private BigDecimal parseAmount(String amountStr) {
-        log.info("Incoming Amount ::: {}", amountStr);
+    private BigDecimal parseAmountToMajor(String amountStr) {
         if (amountStr == null || amountStr.isBlank()) return BigDecimal.ZERO;
         long cents = Long.parseLong(amountStr.trim());
-        log.info("Cents value ::: {}", cents);
-//        return BigDecimal.valueOf(cents).divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP); returning decimals for cents
-//        return BigDecimal.valueOf(cents).divide(BigDecimal.valueOf(100), 0, RoundingMode.HALF_UP);
-        return BigDecimal.valueOf(cents);
+        return BigDecimal.valueOf(cents).movePointLeft(2);
     }
 
     private String maskPan(String pan) {
@@ -170,13 +170,11 @@ public class IsoToJsonConverter {
     private String formatDateLike(Object v) {
         if (v == null) return null;
         if (v instanceof Date) return isoDt.format((Date) v);
-        // some implementations store DATE10 as String like MMddHHmmss
         String s = v.toString();
         if (s.matches("\\d{10}")) {
             try {
-                // parse MMddHHmmss to today's year
                 String y = new SimpleDateFormat("yyyy").format(new Date());
-                return y + s.substring(0, 2) + "-" + s.substring(2, 4) + "T" + s.substring(4, 6) + ":" + s.substring(6, 8) + ":" + s.substring(8, 10);
+                return y + "-" + s.substring(0, 2) + "-" + s.substring(2, 4) + "T" + s.substring(4, 6) + ":" + s.substring(6, 8) + ":" + s.substring(8, 10);
             } catch (Exception ignored) {
             }
         }

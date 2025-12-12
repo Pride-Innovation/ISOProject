@@ -11,6 +11,7 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.Map;
 
 @Service
@@ -24,15 +25,21 @@ public class JsonToIsoConverter {
     public IsoMessage convert(String jsonResponse, IsoMessage request) throws Exception {
         AtmTransactionResponse resp = objectMapper.readValue(jsonResponse, AtmTransactionResponse.class);
 
-        // determine response code
-        String code = resp.getResponseCode() == null ? "96" : resp.getResponseCode();
+        // preserve original for SYSTEM_ERROR text check
+        String origCode = resp.getResponseCode();
+        // determine/normalize response code
+        String code = (origCode == null) ? "96" : origCode.trim();
+        if (!code.matches("\\d{2}")) {
+            code = mapTextToIso39(code);
+        }
+
         // prefer authorizationCode then approvalCode
         String auth = resp.getAuthorizationCode() != null && !resp.getAuthorizationCode().isBlank()
                 ? resp.getAuthorizationCode()
                 : resp.getApprovalCode();
 
-        // map system error -> 96
-        if ("SYSTEM_ERROR".equalsIgnoreCase(code) || "96".equals(code)) {
+        // map system error -> 96 (accept textual SYSTEM_ERROR as well)
+        if ("SYSTEM_ERROR".equalsIgnoreCase(origCode) || "96".equals(code)) {
             IsoMessage error = isoMessageBuilder.createResponseFromRequest(request, request.getType() + 0x10);
             error.setValue(39, "96", IsoType.ALPHA, 2);
             String msg = resp.getMessage() == null ? "SYSTEM_ERROR" : resp.getMessage();
@@ -40,7 +47,7 @@ public class JsonToIsoConverter {
             return error;
         }
 
-        // build base 0210 using builder (echoes many request fields)
+        // build base response (0210/0430 etc.) using builder (echoes many request fields)
         IsoMessage response = isoMessageBuilder.build0210(request, code, auth);
 
         // RRN -> field 37 (transactionId)
@@ -54,7 +61,13 @@ public class JsonToIsoConverter {
         if (resp.getStan() != null && !resp.getStan().isBlank()) {
             String stan = resp.getStan().replaceAll("\\D", "");
             if (stan.length() > 6) stan = stan.substring(stan.length() - 6);
-            response.setValue(11, String.format("%06d", Integer.parseInt(stan)), IsoType.NUMERIC, 6);
+            try {
+                response.setValue(11, String.format("%06d", Integer.parseInt(stan)), IsoType.NUMERIC, 6);
+            } catch (NumberFormatException nfe) {
+                // fallback: left-pad numeric portion or keep request value
+                String padded = stan.length() >= 6 ? stan.substring(stan.length() - 6) : String.format("%06d", 0);
+                response.setValue(11, padded, IsoType.NUMERIC, 6);
+            }
         }
 
         // Amount -> field 4 (prefer amountMinor string, else amount BigDecimal)
@@ -64,14 +77,20 @@ public class JsonToIsoConverter {
         } else if (resp.getAmount() != null) {
             amtMinor = formatMinor(resp.getAmount());
         }
-        if (amtMinor != null) {
+        if (amtMinor != null && !amtMinor.isBlank()) {
             if (amtMinor.length() > 12) amtMinor = amtMinor.substring(amtMinor.length() - 12);
             response.setValue(4, String.format("%012d", Long.parseLong(amtMinor)), IsoType.NUMERIC, 12);
         }
 
-        // Currency -> field 49
+        // Currency -> field 49 (ensure numeric or trimmed)
         if (resp.getCurrency() != null && !resp.getCurrency().isBlank()) {
-            response.setValue(49, resp.getCurrency(), IsoType.NUMERIC, Math.min(resp.getCurrency().length(), 3));
+            String curr = resp.getCurrency().trim();
+            if (curr.matches("\\d+")) {
+                response.setValue(49, curr, IsoType.NUMERIC, Math.min(curr.length(), 3));
+            } else {
+                // fallback: try to send first 3 chars
+                response.setValue(49, curr.substring(0, Math.min(3, curr.length())), IsoType.ALPHA, Math.min(curr.length(), 3));
+            }
         }
 
         // Balances -> field 54 (format: AVAIL=<minor>|LEDGER=<minor>)
@@ -102,10 +121,15 @@ public class JsonToIsoConverter {
             response.setValue(38, ac, IsoType.ALPHA, 6);
         }
 
-        // MAC -> field 64 (base64)
+        // MAC -> field 64 (base64) - ensure 8 bytes
         if (resp.getMacBase64() != null && !resp.getMacBase64().isBlank()) {
             try {
                 byte[] mac = Base64.getDecoder().decode(resp.getMacBase64());
+                if (mac.length != 8) {
+                    byte[] mac8 = new byte[8];
+                    System.arraycopy(mac, 0, mac8, 0, Math.min(mac.length, 8));
+                    mac = mac8;
+                }
                 response.setValue(64, mac, IsoType.BINARY, mac.length);
             } catch (IllegalArgumentException e) {
                 log.warn("Invalid MAC base64 from ESB: {}", resp.getMacBase64());
@@ -122,24 +146,44 @@ public class JsonToIsoConverter {
 
         // rawFields map -> set by id (string values) unless field already present
         Map<String, String> raw = resp.getRawFields();
-        if (raw != null) {
+        if (raw != null && !raw.isEmpty()) {
+            Map<Integer, Map<String, String>> grouped = new HashMap<>();
             for (Map.Entry<String, String> e : raw.entrySet()) {
+                String key = e.getKey();
+                String val = e.getValue();
+                if (val == null) continue;
                 try {
-                    int fid = Integer.parseInt(e.getKey());
-                    String val = e.getValue();
-                    if (val == null) continue;
-                    if (response.hasField(fid)) continue;
-                    if (fid == 64) {
-                        try {
-                            byte[] b = Base64.getDecoder().decode(val);
-                            response.setValue(64, b, IsoType.BINARY, b.length);
-                            continue;
-                        } catch (IllegalArgumentException ignored) {
+                    if (key.contains(".")) {
+                        String[] parts = key.split("\\.", 2);
+                        int parent = Integer.parseInt(parts[0]);
+                        grouped.computeIfAbsent(parent, k -> new HashMap<>()).put(parts[1], val);
+                    } else {
+                        int fid = Integer.parseInt(key);
+                        if (response.hasField(fid)) continue;
+                        if (fid == 64) {
+                            try {
+                                byte[] b = Base64.getDecoder().decode(val);
+                                if (b.length != 8) {
+                                    byte[] b8 = new byte[8];
+                                    System.arraycopy(b, 0, b8, 0, Math.min(8, b.length));
+                                    b = b8;
+                                }
+                                response.setValue(64, b, IsoType.BINARY, b.length);
+                                continue;
+                            } catch (IllegalArgumentException ignored) {
+                            }
                         }
+                        response.setValue(fid, val, IsoType.LLLVAR, Math.min(val.length(), 999));
                     }
-                    response.setValue(fid, val, IsoType.LLLVAR, Math.min(val.length(), 999));
                 } catch (Exception ignored) {
                 }
+            }
+            // write grouped dotted subfields as JSON into parent field (LLLVAR) if parent not set
+            for (Map.Entry<Integer, Map<String, String>> en : grouped.entrySet()) {
+                int parent = en.getKey();
+                if (response.hasField(parent)) continue;
+                String json = objectMapper.writeValueAsString(en.getValue());
+                response.setValue(parent, json, IsoType.LLLVAR, Math.min(json.length(), 999));
             }
         }
 
@@ -158,5 +202,20 @@ public class JsonToIsoConverter {
         BigDecimal minor = value.movePointRight(2).setScale(0, RoundingMode.HALF_UP);
         String digits = minor.toPlainString().replaceAll("\\D", "");
         return digits.isEmpty() ? "0" : digits;
+    }
+
+    private String mapTextToIso39(String text) {
+        if (text == null) return "96";
+        String up = text.trim().toUpperCase();
+        return switch (up) {
+            case "OK", "SUCCESS", "APPROVED", "APPROVAL" -> "00";
+            case "INSUFFICIENT_FUNDS", "INSUFFICIENT FUNDS", "NOT_ENOUGH_FUNDS" -> "51";
+            case "INVALID_ACCOUNT", "ACCOUNT_NOT_FOUND", "NO_ACCOUNT" -> "14";
+            case "EXCEEDS_LIMIT", "LIMIT_EXCEEDED" -> "61";
+            case "AUTH_FAILED", "DECLINED" -> "05";
+            case "DUPLICATE" -> "94";
+            case "TIMEOUT", "UNAVAILABLE", "SERVICE_UNAVAILABLE" -> "96";
+            default -> "96";
+        };
     }
 }

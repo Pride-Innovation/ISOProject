@@ -1,6 +1,5 @@
 package com.pridebank.isoproject.service;
 
-import com.pridebank.isoproject.util.StanGenerator;
 import com.solab.iso8583.IsoMessage;
 import com.solab.iso8583.IsoType;
 import com.solab.iso8583.MessageFactory;
@@ -20,7 +19,6 @@ import java.util.Date;
 public class IsoMessageBuilder {
 
     private final MessageFactory<IsoMessage> messageFactory;
-    private final StanGenerator stanGenerator;
     private final Clock clock;
 
     private static final DateTimeFormatter LOCAL_TIME_FORMAT =
@@ -61,17 +59,53 @@ public class IsoMessageBuilder {
         return response;
     }
 
+    public IsoMessage build0810(IsoMessage request, String networkCode) {
+        IsoMessage response = createResponseFromRequest(request, 0x0810);
+        response.setValue(39, "00", IsoType.ALPHA, 2);
+//        response.setValue(70, networkCode, IsoType.NUMERIC, 3);
+        log.info("Field 70 Information ::: {}", response.getField(70));
+        return response;
+    }
+
+    public IsoMessage build0430(IsoMessage request, String responseCode, String approvalCode) {
+        IsoMessage response = createResponseFromRequest(request, 0x0430);
+        response.setValue(38, approvalCode != null ? approvalCode : "      ", IsoType.ALPHA, 6);
+        response.setValue(39, responseCode, IsoType.ALPHA, 2);
+        return response;
+    }
+
     public IsoMessage createResponseFromRequest(IsoMessage request, int responseMti) {
         IsoMessage response = messageFactory.newMessage(responseMti);
         if (request == null) return response;
 
-        for (int i = 2; i <= 64; i++) {
-            if (i == 38 || i == 39 || i == 44 || i == 54) {
-                continue;
+        // skip copying fields that we set explicitly or which break client unpacking
+        final int[] skip = new int[]{38, 39, 44, 54, 99, 100};
+
+        for (int i = 2; i <= 128; i++) {
+            boolean s = false;
+            for (int v : skip)
+                if (v == i) {
+                    s = true;
+                    break;
+                }
+            if (s) continue;
+            try {
+//                log.info("Request Details ::: {}", request.getField(i));
+                var field = request.getField(i);
+                if (field != null) response.setField(i, field.clone());
+            } catch (Exception ex) {
+                log.warn("Failed cloning field {} into response: {}", i, ex.getMessage());
             }
-            var field = request.getField(i);
-            if (field != null) response.setField(i, field.clone());
         }
+
+        // ensure fields 99 and 100 are removed
+        try {
+            response.removeFields(99);
+            response.removeFields(100);
+        } catch (Exception ex) {
+            log.debug("remove field 99/100: {}", ex.getMessage());
+        }
+
         return response;
     }
 }

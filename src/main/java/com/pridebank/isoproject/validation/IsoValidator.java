@@ -14,16 +14,24 @@ public class IsoValidator {
 
     private static final SimpleDateFormat FIELD7_FMT = new SimpleDateFormat("MMddHHmmss");
 
+    /**
+     * Strict validation only applies to financial request MTI 0200.
+     * For other MTIs (0800 echo/sign-on, 0420 reversal, etc.) return OK or perform light checks elsewhere.
+     */
     public ValidationResult validate0200(IsoMessage m) {
         List<String> errors = new ArrayList<>();
         if (m == null) {
             errors.add("Empty request");
             return ValidationResult.failed(errors);
         }
-        if (m.getType() != 0x200) errors.add("MTI must be 0200");
 
-//        int[] required = {2, 3, 4, 7, 11, 41, 49};
-        int[] required = {2, 3, /*4,*/ 7, 11, 41 /*, 49 removed for test */};
+        // If not a 0200 request, skip strict 0200 checks (caller may apply MTI-specific validation)
+        if (m.getType() != 0x200) {
+            return ValidationResult.ok();
+        }
+
+        // Strict checks for 0200
+        int[] required = {2, 3/*4 optional per config*/, 7, 11, 41 /*, 49 optional */};
         for (int f : required) {
             if (!m.hasField(f)) errors.add("Missing field " + f);
         }
