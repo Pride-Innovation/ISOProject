@@ -24,38 +24,51 @@ public class AtmTransactionProcessor {
         String stan = (isoRequest != null && isoRequest.hasField(11)) ?
                 isoRequest.getObjectValue(11).toString() : "unknown";
 
-        // Bypass 0200 validator for network (0800) and reversal (0420)
         if (isoRequest == null) {
             return createErrorResponse(null, "96", "Empty request");
         }
 
         int mti = isoRequest.getType();
-        try {
-            if (mti == 0x800) {
-                log.info("MTI decimal={} hex=0x{} human={} ", mti, Integer.toHexString(mti).toUpperCase(), String.format("%04X", mti));
-                // echo / sign on - field 70 must be echoed or set; prefer request field 70
-                log.info("Iso Data at 70 ::: {}", isoRequest.getObjectValue(70).toString());
+        String mtiStr = String.format("%04X", mti); // "0200","0420","0430","0800" etc.
+        log.info("Incoming ISO request - numericType={} mtiStr={}", mti, mtiStr);
 
+        try {
+            if ("0800".equals(mtiStr) || mti == 0x800) {
+                log.info("Network message (0800) - field70={}", isoRequest.hasField(70) ? isoRequest.getObjectValue(70) : "N/A");
                 String f70 = isoRequest.hasField(70) ? isoRequest.getObjectValue(70).toString() : "001";
-                log.info("f70 information :::: {}", f70);
                 return isoMessageBuilder.build0810(isoRequest, f70);
             }
-            if (mti == 0x420) {
-                log.info("MTI decimal={} hex=0x{} human={} ", mti, Integer.toHexString(mti).toUpperCase(), String.format("%04X", mti));
-                // reversal - forward to ESB or create response; apply minimal validation
-                // proceed with normal flow but skip strict 0200 validation
-            } else if (mti == 0x200) {
-                log.info("MTI info decimal={} hex=0x{} human={} ", mti, Integer.toHexString(mti).toUpperCase(), String.format("%04X", mti));
 
+            boolean isReversal = "0420".equals(mtiStr) || "0430".equals(mtiStr) || mti == 0x420 || mti == 0x430;
+            if (isReversal) {
+                log.info("Reversal received - MTI={}", mtiStr);
+
+                // Minimal reversal logging
+                Object f11 = isoRequest.hasField(11) ? isoRequest.getObjectValue(11) : null;
+                Object f37 = isoRequest.hasField(37) ? isoRequest.getObjectValue(37) : null;
+                Object f90 = isoRequest.hasField(90) ? isoRequest.getObjectValue(90) : null;
+                Object f95 = isoRequest.hasField(95) ? isoRequest.getObjectValue(95) : null;
+                Object f127 = isoRequest.hasField(127) ? isoRequest.getObjectValue(127) : null;
+
+                log.info("Reversal fields summary - STAN(11)={}, RRN(37)={}, 90={}, 95={}, 127={}",
+                        f11, f37, f90, f95, f127);
+
+                // Skip 0200 validation for reversals; continue to ESB forwarding path below
+            } else if ("0200".equals(mtiStr) || mti == 0x200) {
+                log.info("Purchase (0200) received - performing 0200 validation");
                 IsoValidator.ValidationResult vr = isoValidator.validate0200(isoRequest);
                 if (!vr.isValid()) {
                     log.warn("Validation failed - STAN: {} - {}", stan, vr.summary());
                     return createErrorResponse(isoRequest, "30", truncate(vr.summary()));
                 }
+            } else {
+                log.info("Unhandled MTI {}; continuing (no 0200 validation applied)", mtiStr);
             }
 
             String jsonRequest = isoToJsonConverter.convert(isoRequest);
             log.info("Request in JSON Format ::: {}", jsonRequest);
+
+            // Use same ESB path for testing for both reversals and purchases
             String jsonResponse = esbGatewayService.sendToEsb(jsonRequest, isoRequest);
             return jsonToIsoConverter.convert(jsonResponse, isoRequest);
 
@@ -75,7 +88,7 @@ public class AtmTransactionProcessor {
             } else {
                 IsoMessage response;
                 if (request != null) {
-                    int responseMti = request.getType() + 0x10;
+                    int responseMti = request.getType() + 0x10; // keep response MTI aligned with request
                     response = isoMessageBuilder.createResponseFromRequest(request, responseMti);
                 } else {
                     response = messageFactory.newMessage(0x0210);

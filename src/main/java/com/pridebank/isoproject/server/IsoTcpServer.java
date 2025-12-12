@@ -116,9 +116,6 @@ public class IsoTcpServer {
 
                 try {
                     IsoMessage request = messageFactory.parseMessage(payload, 0);
-                    log.info("Request details Field 123 ::: {}", request.getField(123));
-                    log.info("Request details two::: {}", request.getField(127));
-                    log.info("Request details three 102 ::: {}", request.getField(102));
 
                     IsoMessage response = processor.processTransaction(request);
 

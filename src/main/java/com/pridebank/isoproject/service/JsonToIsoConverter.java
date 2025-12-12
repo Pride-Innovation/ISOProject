@@ -25,15 +25,12 @@ public class JsonToIsoConverter {
     public IsoMessage convert(String jsonResponse, IsoMessage request) throws Exception {
         AtmTransactionResponse resp = objectMapper.readValue(jsonResponse, AtmTransactionResponse.class);
 
-        // preserve original for SYSTEM_ERROR text check
         String origCode = resp.getResponseCode();
-        // determine/normalize response code
         String code = (origCode == null) ? "96" : origCode.trim();
         if (!code.matches("\\d{2}")) {
             code = mapTextToIso39(code);
         }
 
-        // prefer authorizationCode then approvalCode
         String auth = resp.getAuthorizationCode() != null && !resp.getAuthorizationCode().isBlank()
                 ? resp.getAuthorizationCode()
                 : resp.getApprovalCode();
@@ -47,8 +44,16 @@ public class JsonToIsoConverter {
             return error;
         }
 
-        // build base response (0210/0430 etc.) using builder (echoes many request fields)
-        IsoMessage response = isoMessageBuilder.build0210(request, code, auth);
+        // Build base response preserving request->response MTI relationship.
+        // Use createResponseFromRequest so reversal responses (0420->0430) are produced correctly.
+        IsoMessage response = isoMessageBuilder.createResponseFromRequest(request, request.getType() + 0x10);
+
+        // Ensure response code and auth are set (builder may not set them)
+        response.setValue(39, code, IsoType.ALPHA, 2);
+        if (auth != null && !auth.isBlank()) {
+            String ac = auth.length() > 6 ? auth.substring(0, 6) : String.format("%-6s", auth);
+            response.setValue(38, ac, IsoType.ALPHA, 6);
+        }
 
         // RRN -> field 37 (transactionId)
         if (resp.getTransactionId() != null && !resp.getTransactionId().isBlank()) {
@@ -64,13 +69,12 @@ public class JsonToIsoConverter {
             try {
                 response.setValue(11, String.format("%06d", Integer.parseInt(stan)), IsoType.NUMERIC, 6);
             } catch (NumberFormatException nfe) {
-                // fallback: left-pad numeric portion or keep request value
                 String padded = stan.length() >= 6 ? stan.substring(stan.length() - 6) : String.format("%06d", 0);
                 response.setValue(11, padded, IsoType.NUMERIC, 6);
             }
         }
 
-        // Amount -> field 4 (prefer amountMinor string, else amount BigDecimal)
+        // Amount -> field 4
         String amtMinor = null;
         if (resp.getAmountMinor() != null && !resp.getAmountMinor().isBlank()) {
             amtMinor = digitsOnly(resp.getAmountMinor());
@@ -82,18 +86,17 @@ public class JsonToIsoConverter {
             response.setValue(4, String.format("%012d", Long.parseLong(amtMinor)), IsoType.NUMERIC, 12);
         }
 
-        // Currency -> field 49 (ensure numeric or trimmed)
+        // Currency -> field 49
         if (resp.getCurrency() != null && !resp.getCurrency().isBlank()) {
             String curr = resp.getCurrency().trim();
             if (curr.matches("\\d+")) {
                 response.setValue(49, curr, IsoType.NUMERIC, Math.min(curr.length(), 3));
             } else {
-                // fallback: try to send first 3 chars
                 response.setValue(49, curr.substring(0, Math.min(3, curr.length())), IsoType.ALPHA, Math.min(curr.length(), 3));
             }
         }
 
-        // Balances -> field 54 (format: AVAIL=<minor>|LEDGER=<minor>)
+        // Balances -> field 54
         if (resp.getAvailableBalance() != null || resp.getLedgerBalance() != null) {
             String avail = formatMinor(resp.getAvailableBalance());
             String ledger = formatMinor(resp.getLedgerBalance());
@@ -101,7 +104,7 @@ public class JsonToIsoConverter {
             response.setValue(54, bal, IsoType.LLLVAR, Math.min(bal.length(), 120));
         }
 
-        // Mini-statement -> field 62: prefer miniStatementText else JSON array string
+        // Mini-statement -> field 62
         if (resp.getMiniStatementText() != null && !resp.getMiniStatementText().isBlank()) {
             String ms = resp.getMiniStatementText();
             response.setValue(62, ms, IsoType.LLLVAR, Math.min(ms.length(), 999));
@@ -115,13 +118,7 @@ public class JsonToIsoConverter {
             response.setValue(44, resp.getMessage(), IsoType.LLVAR, Math.min(resp.getMessage().length(), 25));
         }
 
-        // Ensure authorization in field 38
-        if (auth != null && !auth.isBlank()) {
-            String ac = auth.length() > 6 ? auth.substring(0, 6) : String.format("%-6s", auth);
-            response.setValue(38, ac, IsoType.ALPHA, 6);
-        }
-
-        // MAC -> field 64 (base64) - ensure 8 bytes
+        // MAC -> field 64
         if (resp.getMacBase64() != null && !resp.getMacBase64().isBlank()) {
             try {
                 byte[] mac = Base64.getDecoder().decode(resp.getMacBase64());
@@ -178,7 +175,6 @@ public class JsonToIsoConverter {
                 } catch (Exception ignored) {
                 }
             }
-            // write grouped dotted subfields as JSON into parent field (LLLVAR) if parent not set
             for (Map.Entry<Integer, Map<String, String>> en : grouped.entrySet()) {
                 int parent = en.getKey();
                 if (response.hasField(parent)) continue;
@@ -196,7 +192,6 @@ public class JsonToIsoConverter {
         return d.isEmpty() ? "0" : d;
     }
 
-    // convert BigDecimal major units to minor unit string (no decimals), padded/truncated as needed
     private static String formatMinor(BigDecimal value) {
         if (value == null) return "0";
         BigDecimal minor = value.movePointRight(2).setScale(0, RoundingMode.HALF_UP);
