@@ -23,7 +23,7 @@ import java.net.Socket;
 import java.text.SimpleDateFormat;
 import java.util.Base64;
 import java.util.Date;
-import java.util.Optional;
+//import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.HashMap;
@@ -116,9 +116,9 @@ public class IsoTcpServer {
 
                 try {
                     IsoMessage request = messageFactory.parseMessage(payload, 0);
-                    log.info("Request details Field 123 ::: {}", Optional.ofNullable(request.getObjectValue(123)));
-                    log.info("Request details two::: {}", Optional.ofNullable(request.getObjectValue(127)));
-
+                    log.info("Request details Field 123 ::: {}", request.getField(123));
+                    log.info("Request details two::: {}", request.getField(127));
+                    log.info("Request details three 102 ::: {}", request.getField(102));
 
                     IsoMessage response = processor.processTransaction(request);
 
@@ -307,7 +307,8 @@ public class IsoTcpServer {
             int typeInt = response.getType();
             // solab type is numeric (e.g. 0x200) - convert to decimal MTI string
             String mtiStr = String.format("%04d", typeInt);
-            jmsg.setMTI(mtiStr);
+            // solab type is numeric (e.g. 0x200) - convert to 4-digit HEX MTI string ("0200", "0210", "0800", "0810")
+            jmsg.setMTI(String.format("%04X", typeInt));
         } catch (Throwable ignore) {
         }
         jmsg.setPackager(jposPackager);
