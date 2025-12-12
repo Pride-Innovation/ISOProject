@@ -46,7 +46,6 @@ public class IsoTcpServer {
     @Value("${atm.server.socket.timeout:300000}")
     private int socketTimeoutMs;
 
-    // jPOS packager for wire-compatible packing (uses same fields.xml as client)
     private GenericPackager jposPackager;
 
     private ServerSocket serverSocket;
@@ -55,7 +54,6 @@ public class IsoTcpServer {
 
     @PostConstruct
     public void start() throws Exception {
-        // load jPOS packager first (server-side compatibility shim)
         try (InputStream is = getClass().getResourceAsStream("/packager/fields.xml")) {
             if (is == null) {
                 log.warn("jPOS packager resource /packager/fields.xml not found on classpath; jPOS packing disabled");
@@ -118,7 +116,10 @@ public class IsoTcpServer {
 
                 try {
                     IsoMessage request = messageFactory.parseMessage(payload, 0);
-                    log.info("Parsed Request ::: {}", request);
+                    log.info("Request details Field 123 ::: {}", Optional.ofNullable(request.getObjectValue(123)));
+                    log.info("Request details two::: {}", Optional.ofNullable(request.getObjectValue(127)));
+
+
                     IsoMessage response = processor.processTransaction(request);
 
                     if (response == null) {
@@ -126,53 +127,26 @@ public class IsoTcpServer {
                         continue;
                     }
 
-                    log.info("Transaction Response (IsoMessage) ::: {}", Optional.ofNullable(response.getObjectValue(70)));
-
-                    // Log details BEFORE sanitize
                     try {
-                        boolean has70 = response.hasField(70);
-                        Object obj70 = has70 ? response.getObjectValue(70) : null;
-                        String typeLen = "n/a";
-                        try {
-                            var f70 = response.getField(70);
-                            if (f70 != null) typeLen = f70.getType() + "/" + f70.getLength();
-                        } catch (Exception ignore) {
-                        }
-                        log.info("Response BEFORE sanitize - field70 present={} value='{}' type/len={}", has70, obj70, typeLen);
-
-                        StringBuilder sb = new StringBuilder();
-                        for (int i = 2; i <= 128; i++) {
-                            if (response.hasField(i)) {
-                                var fld = response.getField(i);
-                                Object val = response.getObjectValue(i);
-                                sb.append(i)
-                                        .append("[")
-                                        .append(fld != null ? fld.getType() : "null")
-                                        .append("/")
-                                        .append(fld != null ? fld.getLength() : "n/a")
-                                        .append("]=")
-                                        .append(val)
-                                        .append("; ");
-                            }
-                        }
-                        log.debug("Response BEFORE sanitize - fields dump: {}", sb.toString());
-                    } catch (Exception ex) {
-                        log.warn("Unable to log response details BEFORE sanitize: {}", ex.getMessage());
-                    }
-
-                    // Sanitize numeric LL fields that the client packager expects as digits-only
-                    try {
-                        log.info("Still checking Field 70 ::: {}", Optional.ofNullable(response.getObjectValue(70)));
                         sanitizeNumericLlFields(response);
                     } catch (Exception ex) {
                         log.debug("sanitizeNumericLlFields failed: {}", ex.getMessage());
                     }
 
-                    // Remove high-numbered fields (99..128) to avoid client unpack mismatches
+                    // Preserve important high fields (102, 123, 127). remove other high fields if present.
                     try {
                         for (int f = 99; f <= 128; f++) {
+                            if (f == 102 || f == 123 || f == 127) continue; // preserve these
                             if (response.hasField(f)) {
-                                response.removeFields(f);
+                                try {
+                                    response.removeFields(f);
+                                } catch (NoSuchMethodError nsme) {
+                                    try {
+                                        response.removeFields(f);
+                                    } catch (Exception ignored) {
+                                    }
+                                } catch (Exception ignore) {
+                                }
                                 log.debug("Removed field {} from outgoing response to avoid client unpack issues", f);
                             }
                         }
@@ -180,63 +154,68 @@ public class IsoTcpServer {
                         log.debug("Failed removing high-numbered fields before send: {}", ex.getMessage());
                     }
 
-                    byte[] respBytesSolab = null;
-                    try {
-                        Object post70 = response.getObjectValue(70);
-                        log.info("Response AFTER sanitize - field70 object='{}'", post70);
-                        var f70 = response.getField(70);
-                        log.info("Response AFTER sanitize - field70 type/len={}/{}", f70 != null ? f70.getType() : "null", f70 != null ? f70.getLength() : "n/a");
-
-                        // Force field 70 to be NUMERIC(3) just before packing to avoid template/default interference
-                        try {
-                            Object val70 = response.getObjectValue(70);
-                            if (val70 != null) {
-                                String raw = val70.toString().trim();
-                                int intval = Integer.parseInt(raw);
-                                String padded = String.format("%03d", intval);
-                                response.setValue(70, padded, IsoType.NUMERIC, 3);
-                                log.debug("Forced field70 as NUMERIC(3): '{}'", padded);
-                            }
-                        } catch (NumberFormatException nfe) {
-                            try {
-                                Object val70 = response.getObjectValue(70);
-                                if (val70 != null) {
-                                    String s = val70.toString();
-                                    String outStr = s.length() >= 3 ? s.substring(0, 3) : String.format("%-3s", s);
-                                    response.setValue(70, outStr, IsoType.ALPHA, 3);
-                                    log.debug("Forced field70 fallback as ALPHA(3): '{}'", outStr);
-                                }
-                            } catch (Exception ignore) {
-                            }
-                        } catch (Exception ex) {
-                            log.debug("Could not enforce field70 numeric: {}", ex.getMessage());
-                        }
-
-                        // keep solab-packed bytes for debug
-                        try {
-                            respBytesSolab = response.writeData();
-                            log.debug("Solab-packed outgoing response length={} bytes. Hex:\n{}", respBytesSolab.length, bytesToHex(respBytesSolab));
-                            log.debug("Outgoing response info (base64): {}", Base64.getEncoder().encodeToString(respBytesSolab));
-                        } catch (Exception ex) {
-                            log.debug("Solab writeData() failed: {}", ex.getMessage());
-                        }
-                    } catch (Exception dbg) {
-                        log.warn("Pre-send debug failed: {}", dbg.getMessage());
-                    }
-
-                    // Now convert to jPOS ISOMsg and pack with jPOS packager for compatibility if available
                     try {
                         if (jposPackager != null) {
                             ISOMsg jmsg = getIsoMsg(response);
 
-                            // copy fields 2..128 with minimal conversions:
                             for (int i = 2; i <= 128; i++) {
                                 try {
                                     if (!response.hasField(i)) continue;
                                     Object val = response.getObjectValue(i);
                                     if (val == null) continue;
 
-                                    // Special-case date/time fields so jPOS sees the expected numeric strings
+                                    // --- special handling for parent field 127 (composite) ---
+                                    if (i == 127) {
+                                        // 1) if solab stored nested IsoMessage for 127, use its raw bytes
+                                        try {
+                                            IsoValue<?> v127 = response.getField(127);
+                                            if (v127 != null) {
+                                                Object inner = v127.getValue();
+                                                if (inner instanceof IsoMessage) {
+                                                    try {
+                                                        byte[] nested = ((IsoMessage) inner).writeData();
+                                                        if (nested != null && nested.length > 0) {
+                                                            jmsg.set(127, nested);
+                                                            continue;
+                                                        }
+                                                    } catch (Exception ignore) {
+                                                    }
+                                                }
+                                                // if inner is byte[] already, pass-through
+                                                if (inner instanceof byte[]) {
+                                                    jmsg.set(127, (byte[]) inner);
+                                                    continue;
+                                                }
+                                            }
+                                        } catch (Exception ignore) {
+                                        }
+
+                                        // 2) if value itself is byte[], pass-through
+                                        if (val instanceof byte[]) {
+                                            jmsg.set(127, (byte[]) val);
+                                            continue;
+                                        }
+
+                                        // 3) if value looks like hex string, convert -> bytes
+                                        if (val instanceof String) {
+                                            String s = ((String) val).trim();
+                                            if (s.matches("(?i)^[0-9A-F]+$") && (s.length() % 2 == 0)) {
+                                                byte[] b = hexToBytes(s);
+                                                jmsg.set(127, b);
+                                                continue;
+                                            }
+                                            // 4) generic fallback: set textual representation (less desirable)
+                                            jmsg.set(127, s);
+                                            continue;
+                                        }
+
+                                        // fallback generic
+                                        jmsg.set(127, val.toString());
+                                        continue;
+                                    }
+                                    // --- end 127 handling ---
+
+                                    // Dates -> formatted strings for fields 7/12/13
                                     if (val instanceof Date) {
                                         String s;
                                         if (i == 7) s = F7.format((Date) val);
@@ -247,35 +226,27 @@ public class IsoTcpServer {
                                         continue;
                                     }
 
-                                    // If solab stored numeric/longs etc, stringify
-                                    if (val instanceof Number || !(val instanceof byte[])) {
-                                        // binary fields in jPOS expect byte[]; try to detect common binary field ids
-                                        if (val instanceof String) {
-                                            // if target packager expects binary, try to convert hex string to bytes
-                                            try {
-                                                String cls = jposPackager.getFieldPackager(i).getClass().getSimpleName();
-                                                if (cls.toUpperCase().contains("BINARY") || cls.toUpperCase().contains("IFB_BINARY") || cls.toUpperCase().contains("IFA_BINARY")) {
-                                                    String s = (String) val;
-                                                    // treat as hex if it looks hexy
-                                                    if (s.matches("(?i)^[0-9A-F]+$") && (s.length() % 2 == 0)) {
-                                                        int len = s.length() / 2;
-                                                        byte[] b = new byte[len];
-                                                        for (int k = 0; k < len; k++) {
-                                                            b[k] = (byte) Integer.parseInt(s.substring(k * 2, k * 2 + 2), 16);
-                                                        }
-                                                        jmsg.set(i, b);
-                                                        continue;
-                                                    }
+                                    // When target packager expects binary, convert hex string -> bytes if appropriate
+                                    if (val instanceof String) {
+                                        try {
+                                            String cls = jposPackager.getFieldPackager(i).getClass().getSimpleName();
+                                            if (cls.toUpperCase().contains("BINARY") || cls.toUpperCase().contains("IFB_BINARY") || cls.toUpperCase().contains("IFA_BINARY")) {
+                                                String s = (String) val;
+                                                if (s.matches("(?i)^[0-9A-F]+$") && (s.length() % 2 == 0)) {
+                                                    int len = s.length() / 2;
+                                                    byte[] b = hexToBytes(s);
+                                                    jmsg.set(i, b);
+                                                    continue;
                                                 }
-                                            } catch (Exception ignore) {
-                                                // fallback to string
                                             }
+                                        } catch (Exception ignore) {
                                         }
-                                        jmsg.set(i, val.toString());
-                                    } else if (val instanceof byte[]) {
+                                    }
+
+                                    // number / non-byte default: stringify
+                                    if (val instanceof byte[]) {
                                         jmsg.set(i, (byte[]) val);
                                     } else {
-                                        // fallback
                                         jmsg.set(i, val.toString());
                                     }
                                 } catch (Exception ex) {
@@ -293,7 +264,7 @@ public class IsoTcpServer {
                             out.flush();
                         } else {
                             // fallback to solab bytes
-                            byte[] toSend = respBytesSolab != null ? respBytesSolab : response.writeData();
+                            byte[] toSend = response.writeData();
                             out.write((toSend.length >> 8) & 0xFF);
                             out.write(toSend.length & 0xFF);
                             out.write(toSend);
@@ -302,7 +273,7 @@ public class IsoTcpServer {
                     } catch (Exception sendEx) {
                         log.error("Failed to pack/send response via jPOS; attempting to send solab bytes", sendEx);
                         try {
-                            byte[] toSend = respBytesSolab != null ? respBytesSolab : response.writeData();
+                            byte[] toSend = response.writeData();
                             out.write((toSend.length >> 8) & 0xFF);
                             out.write(toSend.length & 0xFF);
                             out.write(toSend);
@@ -331,10 +302,11 @@ public class IsoTcpServer {
 
     private ISOMsg getIsoMsg(IsoMessage response) {
         ISOMsg jmsg = new ISOMsg();
-        // set MTI from solab type (format as 4-digit numeric string, e.g. 0800)
+        // set MTI from solab type (format as 4-digit numeric string, e.g. 0200)
         try {
             int typeInt = response.getType();
-            String mtiStr = String.format("%04X", typeInt);
+            // solab type is numeric (e.g. 0x200) - convert to decimal MTI string
+            String mtiStr = String.format("%04d", typeInt);
             jmsg.setMTI(mtiStr);
         } catch (Throwable ignore) {
         }
@@ -416,6 +388,16 @@ public class IsoTcpServer {
         return sb.toString();
     }
 
+    private static byte[] hexToBytes(String s) {
+        int len = s.length();
+        byte[] data = new byte[len / 2];
+        for (int i = 0; i < len; i += 2) {
+            data[i / 2] = (byte) ((Character.digit(s.charAt(i), 16) << 4)
+                    + Character.digit(s.charAt(i + 1), 16));
+        }
+        return data;
+    }
+
     @PreDestroy
     public void stop() throws Exception {
         log.info("Stopping ISO-8583 TCP server...");
@@ -426,4 +408,5 @@ public class IsoTcpServer {
         if (pool != null) pool.shutdownNow();
         log.info("ISO-8583 TCP server stopped");
     }
+
 }
