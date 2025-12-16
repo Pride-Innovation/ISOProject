@@ -548,7 +548,6 @@ public class AtmTransactionProcessor {
                 if (!truncated.isBlank()) allowed.add(44);
                 // return a clean response with only allowed fields (exact match to request plus 39/44)
                 return buildResponseContainingOnlyAllowed(response.getType(), allowed, request, response, response);
-//                return null;
             }
         } catch (Exception e) {
             throw new RuntimeException("Unable to create error response", e);
