@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.pridebank.isoproject.dto.AtmTransactionResponse;
 import com.solab.iso8583.IsoMessage;
 import com.solab.iso8583.IsoType;
+import com.solab.iso8583.IsoValue;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -12,6 +13,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @Service
@@ -98,19 +100,28 @@ public class JsonToIsoConverter {
 
         // Balances -> field 54
         if (resp.getAvailableBalance() != null || resp.getLedgerBalance() != null) {
-            String avail = formatMinor(resp.getAvailableBalance());
-            String ledger = formatMinor(resp.getLedgerBalance());
-            String bal = "AVAIL=" + avail + "|LEDGER=" + ledger;
+            // prefer available balance: you may change formatting as needed
+            String bal = formatMinor(resp.getAvailableBalance());
             response.setValue(54, bal, IsoType.LLLVAR, Math.min(bal.length(), 120));
         }
 
-        // Mini-statement -> field 62
+        // Mini-statement -> field 48 for ATM ministatement requests, otherwise field 62
+        // Accept either miniStatementText (plain string) or miniStatement (structured list)
+        boolean isMiniReq = isMinistatementRequest(request);
         if (resp.getMiniStatementText() != null && !resp.getMiniStatementText().isBlank()) {
             String ms = resp.getMiniStatementText();
-            response.setValue(62, ms, IsoType.LLLVAR, Math.min(ms.length(), 999));
+            if (isMiniReq) {
+                response.setValue(48, ms, IsoType.LLLVAR, Math.min(ms.length(), 999));
+            } else {
+                response.setValue(62, ms, IsoType.LLLVAR, Math.min(ms.length(), 999));
+            }
         } else if (resp.getMiniStatement() != null && !resp.getMiniStatement().isEmpty()) {
-            String msText = objectMapper.writeValueAsString(resp.getMiniStatement());
-            response.setValue(62, msText, IsoType.LLLVAR, Math.min(msText.length(), 999));
+            String msText = buildMiniStatementText(resp.getMiniStatement());
+            if (isMiniReq) {
+                response.setValue(48, msText, IsoType.LLLVAR, Math.min(msText.length(), 999));
+            } else {
+                response.setValue(62, msText, IsoType.LLLVAR, Math.min(msText.length(), 999));
+            }
         }
 
         // Message -> field 44
@@ -199,6 +210,92 @@ public class JsonToIsoConverter {
         return digits.isEmpty() ? "0" : digits;
     }
 
+    // Build ministatement plain-text lines (max 10 records). Each line: YYYY-MM-DD|Narration|+/-Amount|Balance
+    private String buildMiniStatementText(Object miniObj) {
+        try {
+            List<Map<String, Object>> list = objectMapper.convertValue(
+                    miniObj,
+                    objectMapper.getTypeFactory().constructCollectionType(List.class, Map.class)
+            );
+
+            StringBuilder sb = new StringBuilder();
+            int limit = Math.min(10, list.size());
+            for (int i = 0; i < limit; i++) {
+                Map<String, Object> rec = list.get(i);
+                String date = firstNonNullString(rec, "date", "transactionDate", "tranDate");
+                String narration = firstNonNullString(rec, "narration", "description", "narr");
+                String amount = firstNonNullString(rec, "amount", "txnAmount", "amt");
+                String balance = firstNonNullString(rec, "balance", "runningBalance", "bal");
+
+                if (date == null) date = "";
+                if (narration == null) narration = "";
+                if (amount == null) amount = "";
+                if (balance == null) balance = "";
+
+                amount = normalizeAmountString(amount);
+                balance = normalizeAmountString(balance);
+
+                sb.append(date).append("|").append(narration).append("|").append(amount).append("|").append(balance);
+                if (i < limit - 1) sb.append("\n");
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            try {
+                String json = objectMapper.writeValueAsString(miniObj);
+                return json.length() > 999 ? json.substring(0, 999) : json;
+            } catch (Exception ex) {
+                return "";
+            }
+        }
+    }
+
+    private static String firstNonNullString(Map<String, Object> m, String... keys) {
+        for (String k : keys) {
+            if (m.containsKey(k) && m.get(k) != null) return String.valueOf(m.get(k));
+        }
+        return null;
+    }
+
+    private static String normalizeAmountString(String s) {
+        if (s == null) return "";
+        s = s.trim();
+        try {
+            BigDecimal bd = new BigDecimal(s.replaceAll("[^0-9\\-.]", ""));
+            bd = bd.setScale(2, RoundingMode.HALF_UP);
+            return bd.toPlainString();
+        } catch (Exception ignore) {
+            return s;
+        }
+    }
+
+    // Determine if incoming request is a ministatement (proc starting with 32 or 38)
+    private boolean isMinistatementRequest(IsoMessage request) {
+        if (request == null) return false;
+        try {
+            if (!request.hasField(3)) return false;
+            Object p = null;
+            try {
+                p = request.getObjectValue(3);
+            } catch (Throwable ignore) {
+                // fallback
+            }
+            if (p == null) {
+                try {
+                    IsoValue<?> v = request.getField(3);
+                    if (v != null) p = v.getValue();
+                } catch (Throwable ignored) {
+                }
+            }
+            if (p == null) return false;
+            String proc = p.toString().trim();
+            return proc.startsWith("32") || proc.startsWith("38")
+                    || proc.equalsIgnoreCase("MINISTATEMENT")
+                    || proc.equalsIgnoreCase("MINI_STATEMENT");
+        } catch (Throwable ignore) {
+            return false;
+        }
+    }
+
     private String mapTextToIso39(String text) {
         if (text == null) return "96";
         String up = text.trim().toUpperCase();
@@ -209,7 +306,7 @@ public class JsonToIsoConverter {
             case "EXCEEDS_LIMIT", "LIMIT_EXCEEDED" -> "61";
             case "AUTH_FAILED", "DECLINED" -> "05";
             case "DUPLICATE" -> "94";
-            case "TIMEOUT", "UNAVAILABLE", "SERVICE_UNAVAILABLE" -> "96";
+//            case "TIMEOUT", "UNAVAILABLE", "SERVICE_UNAVAILABLE" -> "96";
             default -> "96";
         };
     }

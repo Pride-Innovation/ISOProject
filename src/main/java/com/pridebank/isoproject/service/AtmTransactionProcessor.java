@@ -120,9 +120,15 @@ public class AtmTransactionProcessor {
 
             boolean isMiniStatement = isMinistatementTransaction(isoRequest);
             Set<Integer> allowed = new HashSet<>(collectPresentFields(isoRequest));
-            Set<Integer> mandatory = new HashSet<>(Arrays.asList(38, 39, 54));
-            if (isMiniStatement) mandatory.add(48);
-            allowed.addAll(mandatory);
+
+            /*
+                Add these fields only if it is a transaction, and it is not a reversal
+             */
+            if (!isReversal) {
+                Set<Integer> mandatory = new HashSet<>(Arrays.asList(38, 39, 54));
+                if (isMiniStatement) mandatory.add(48);
+                allowed.addAll(mandatory);
+            }
 
             IsoMessage finalResp = buildResponseContainingOnlyAllowed(
                     responseMti,
@@ -141,7 +147,14 @@ public class AtmTransactionProcessor {
                 // success case
                 if ("00".equals(rc)) {
                     // non-ministatement types that need balance + auth
-                    if (txType.equals("01") || txType.equals("21") || txType.equals("31") || txType.equals("00")) {
+                    log.info("Transaction Type ::: {}", txType);
+
+                    if (txType.equals("01")
+                            || txType.equals("21")
+                            || txType.equals("31")
+                            || txType.equals("00")
+                            || txType.equals("02")
+                    ) {
                         if (allowed.contains(39)) {
                             try {
                                 finalResp.setValue(39, "00", IsoType.ALPHA, 2);
@@ -174,6 +187,7 @@ public class AtmTransactionProcessor {
                             }
                         }
                         Object mini = safeGetObjectValue(esbIsoResp, 48);
+
                         if (mini == null) mini = safeGetObjectValue(finalResp, 48);
                         if (mini != null && allowed.contains(48)) {
                             String ms = safeToString(mini);
@@ -645,7 +659,7 @@ public class AtmTransactionProcessor {
                 }
 
                 if (!removed) {
-                    log.debug("Unable to remove field {} from response (no supported API found). Last error: {}", f, lastEx == null ? "none" : lastEx.getMessage());
+                    log.debug("Unable to remove field {} from response (no supported API found). Last error: {}", f, lastEx.getMessage());
                 } else {
                     // optional debug
                     log.trace("Pruned field {}", f);
