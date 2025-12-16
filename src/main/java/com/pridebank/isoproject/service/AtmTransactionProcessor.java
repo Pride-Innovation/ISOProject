@@ -74,10 +74,6 @@ public class AtmTransactionProcessor {
             // Network management (0800) -> echo/sign-on: return EXACTLY the fields from the request
             if ("0800".equals(mtiStr) || mti == 0x800) {
                 log.info("Network message (0800) - building 0810 echo body (fields exactly as request)");
-                IsoMessage echo = isoMessageBuilder.build0810(
-                        isoRequest,
-                        safeHasField(isoRequest, 70) ?
-                                safeToString(safeGetObjectValue(isoRequest, 70)) : "001");
 
                 // Allowed fields: only those present in the request (exact match)
                 Set<Integer> allowed = new HashSet<>(collectPresentFields(isoRequest));
@@ -87,7 +83,9 @@ public class AtmTransactionProcessor {
                         responseMti,
                         allowed,
                         isoRequest,
-                        responseTemplate);
+                        null,
+                        responseTemplate
+                );
 
                 log.info("Response MTI status :::: {}", responseMti);
 
@@ -130,8 +128,92 @@ public class AtmTransactionProcessor {
                     responseMti,
                     allowed,
                     isoRequest,
+                    esbIsoResp,
                     responseTemplate
             );
+
+            try {
+                String proc = safeToString(safeGetObjectValue(isoRequest, 3)).trim();
+                String txType = proc.length() >= 2 ? proc.substring(0, 2) : proc;
+                String rc = safeToString(safeGetObjectValue(esbIsoResp, 39)).trim();
+                if (rc.isEmpty()) rc = safeToString(safeGetObjectValue(finalResp, 39)).trim();
+
+                // success case
+                if ("00".equals(rc)) {
+                    // non-ministatement types that need balance + auth
+                    if (txType.equals("01") || txType.equals("21") || txType.equals("31") || txType.equals("00")) {
+                        if (allowed.contains(39)) {
+                            try {
+                                finalResp.setValue(39, "00", IsoType.ALPHA, 2);
+                            } catch (Throwable ignore) {
+                            }
+                        }
+                        Object bal = safeGetObjectValue(esbIsoResp, 54);
+                        if (bal == null) bal = safeGetObjectValue(finalResp, 54);
+                        if (bal != null && allowed.contains(54)) {
+                            String sval = safeToString(bal);
+                            try {
+                                finalResp.setValue(54, sval, IsoType.LLLVAR, Math.min(sval.length(), 999));
+                            } catch (Throwable ignore) {
+                            }
+                        }
+                        Object auth = safeGetObjectValue(esbIsoResp, 38);
+                        if (auth == null) auth = safeGetObjectValue(finalResp, 38);
+                        if (auth != null && allowed.contains(38)) {
+                            String as = safeToString(auth);
+                            try {
+                                finalResp.setValue(38, as, IsoType.ALPHA, Math.min(as.length(), 12));
+                            } catch (Throwable ignore) {
+                            }
+                        }
+                    } else if (txType.equals("38")) { // ministatement
+                        if (allowed.contains(39)) {
+                            try {
+                                finalResp.setValue(39, "00", IsoType.ALPHA, 2);
+                            } catch (Throwable ignore) {
+                            }
+                        }
+                        Object mini = safeGetObjectValue(esbIsoResp, 48);
+                        if (mini == null) mini = safeGetObjectValue(finalResp, 48);
+                        if (mini != null && allowed.contains(48)) {
+                            String ms = safeToString(mini);
+                            try {
+                                finalResp.setValue(48, ms, IsoType.LLLVAR, Math.min(ms.length(), 999));
+                            } catch (Throwable ignore) {
+                            }
+                        }
+                        Object bal = safeGetObjectValue(esbIsoResp, 54);
+                        if (bal == null) bal = safeGetObjectValue(finalResp, 54);
+                        if (bal != null && allowed.contains(54)) {
+                            String sval = safeToString(bal);
+                            try {
+                                finalResp.setValue(54, sval, IsoType.LLLVAR, Math.min(sval.length(), 999));
+                            } catch (Throwable ignore) {
+                            }
+                        }
+                        Object auth = safeGetObjectValue(esbIsoResp, 38);
+                        if (auth == null) auth = safeGetObjectValue(finalResp, 38);
+                        if (auth != null && allowed.contains(38)) {
+                            String as = safeToString(auth);
+                            try {
+                                finalResp.setValue(38, as, IsoType.ALPHA, Math.min(as.length(), 12));
+                            } catch (Throwable ignore) {
+                            }
+                        }
+                    }
+                } else {
+                    // failure: set 39 to failed response code (if allowed)
+                    if (allowed.contains(39) && !rc.isBlank()) {
+                        try {
+                            finalResp.setValue(39, rc, IsoType.ALPHA, Math.min(rc.length(), 2));
+                        } catch (Throwable ignore) {
+                        }
+                    }
+                }
+
+            } catch (Exception ex) {
+                log.debug("Failed applying transaction-specific population rules: {}", ex.getMessage());
+            }
 
             logIsoMessageFieldsForReturn(finalResp);
 
@@ -147,6 +229,7 @@ public class AtmTransactionProcessor {
             int responseMti,
             Set<Integer> allowed,
             IsoMessage request,
+            IsoMessage preferredSource,
             IsoMessage template
     ) {
         IsoMessage resp = messageFactory.newMessage(responseMti);
@@ -155,6 +238,7 @@ public class AtmTransactionProcessor {
         } catch (Throwable ignore) {
         }
 
+        // Defensive: remove any default/populated fields that the factory might have set.
         try {
             pruneResponseFields(resp, Collections.emptySet());
         } catch (Exception ignored) {
@@ -168,6 +252,7 @@ public class AtmTransactionProcessor {
                 Object val = null;
                 IsoValue<?> srcIsoValue = null;
 
+                // prefer request
                 if (request != null && safeHasField(request, f)) {
                     val = safeGetObjectValue(request, f);
                     try {
@@ -177,10 +262,10 @@ public class AtmTransactionProcessor {
                 }
 
                 // then ESB/preferred source
-                if (val == null && null != null && safeHasField(null, f)) {
-                    val = safeGetObjectValue(null, f);
+                if (val == null && preferredSource != null && safeHasField(preferredSource, f)) {
+                    val = safeGetObjectValue(preferredSource, f);
                     try {
-                        srcIsoValue = ((IsoMessage) null).getField(f);
+                        srcIsoValue = preferredSource.getField(f);
                     } catch (Exception ignore) {
                     }
                 }
@@ -244,17 +329,19 @@ public class AtmTransactionProcessor {
             }
         }
 
-        // ensure nothing outside allowed remains
+        // Final cleanup: ensure nothing outside allowed remains.
         try {
             pruneResponseFields(resp, allowed);
         } catch (Exception ignored) {
         }
+
         try {
             removeForbidden127Subfields(resp);
         } catch (Exception ignored) {
         }
         return resp;
     }
+
     // --- Safe logging helpers ------------------------------------------------
 
     private Map<String, Object> buildFieldMapForLog(IsoMessage msg) {
@@ -338,8 +425,6 @@ public class AtmTransactionProcessor {
             return false;
         }
     }
-
-    // --- Remaining helpers (unchanged) --------------------------------------
 
     private void logIsoMessageFieldsForReturn(IsoMessage msg) {
         try {
@@ -462,8 +547,8 @@ public class AtmTransactionProcessor {
                 allowed.add(39);
                 if (!truncated.isBlank()) allowed.add(44);
                 // return a clean response with only allowed fields (exact match to request plus 39/44)
-//                return buildResponseContainingOnlyAllowed(response.getType(), allowed, request, response, response);
-                return null;
+                return buildResponseContainingOnlyAllowed(response.getType(), allowed, request, response, response);
+//                return null;
             }
         } catch (Exception e) {
             throw new RuntimeException("Unable to create error response", e);
@@ -589,4 +674,3 @@ public class AtmTransactionProcessor {
         }
     }
 }
-// ...existing code...
