@@ -55,10 +55,6 @@ public class AtmTransactionProcessor {
             responseTemplate = messageFactory.newMessage(responseMti);
         }
 
-        // Keep template only for possible encoder/type metadata; DO NOT copy template defaults into final response.
-
-        // Remove forbidden 127 parts early from template to avoid metadata issues
-
         try {
             removeForbidden127Subfields(responseTemplate);
         } catch (Exception ex) {
@@ -78,20 +74,25 @@ public class AtmTransactionProcessor {
             // Network management (0800) -> echo/sign-on: return EXACTLY the fields from the request
             if ("0800".equals(mtiStr) || mti == 0x800) {
                 log.info("Network message (0800) - building 0810 echo body (fields exactly as request)");
-                IsoMessage echo = isoMessageBuilder.build0810(isoRequest, safeHasField(isoRequest, 70) ? safeToString(safeGetObjectValue(isoRequest, 70)) : "001");
+                IsoMessage echo = isoMessageBuilder.build0810(
+                        isoRequest,
+                        safeHasField(isoRequest, 70) ?
+                                safeToString(safeGetObjectValue(isoRequest, 70)) : "001");
 
-                /*
-                    Allowed fields: only those present in the request (exact match)
-                    Set<Integer> allowed = new HashSet<>(collectPresentFields(isoRequest));
+                // Allowed fields: only those present in the request (exact match)
+                Set<Integer> allowed = new HashSet<>(collectPresentFields(isoRequest));
 
-                    Build response using request values only (prefer request; do not add ESB/template-only fields)
-                    IsoMessage finalResp = buildResponseContainingOnlyAllowed(responseMti, allowed, isoRequest, null, responseTemplate);
-                 */
+                // Build response using request values only (prefer request; do not add ESB/template-only fields)
+                IsoMessage finalResp = buildResponseContainingOnlyAllowed(
+                        responseMti,
+                        allowed,
+                        isoRequest,
+                        responseTemplate);
 
                 log.info("Response MTI status :::: {}", responseMti);
 
                 isoRequest.setType(responseMti);
-                return isoRequest;
+                return finalResp;
             }
 
             boolean isReversal = "0420".equals(mtiStr) || "0430".equals(mtiStr) || mti == 0x420 || mti == 0x430;
@@ -120,15 +121,20 @@ public class AtmTransactionProcessor {
             }
 
             boolean isMiniStatement = isMinistatementTransaction(isoRequest);
-
-            // IMPORTANT: Allowed fields = exactly the fields present in the original request.
-            // This guarantees the response contains exactly the same numeric fields as the request.
             Set<Integer> allowed = new HashSet<>(collectPresentFields(isoRequest));
+            Set<Integer> mandatory = new HashSet<>(Arrays.asList(38, 39, 54));
+            if (isMiniStatement) mandatory.add(48);
+            allowed.addAll(mandatory);
 
-            // Build clean final response from allowed set (prefer request values; do not add ESB-only fields)
-            IsoMessage finalResp = buildResponseContainingOnlyAllowed(responseMti, allowed, isoRequest, null, responseTemplate);
+            IsoMessage finalResp = buildResponseContainingOnlyAllowed(
+                    responseMti,
+                    allowed,
+                    isoRequest,
+                    responseTemplate
+            );
 
             logIsoMessageFieldsForReturn(finalResp);
+
             return finalResp;
 
         } catch (Exception e) {
@@ -137,25 +143,18 @@ public class AtmTransactionProcessor {
         }
     }
 
-    // Build a new clean response message that contains only fields in `allowed`.
-    // Prefer values from `request` first; `preferredSource` is ignored in current policy (kept for compatibility).
-    private IsoMessage buildResponseContainingOnlyAllowed(int responseMti, Set<Integer> allowed,
-                                                          IsoMessage request, IsoMessage preferredSource, IsoMessage template) {
+    private IsoMessage buildResponseContainingOnlyAllowed(
+            int responseMti,
+            Set<Integer> allowed,
+            IsoMessage request,
+            IsoMessage template
+    ) {
         IsoMessage resp = messageFactory.newMessage(responseMti);
-
-        log.info("Response MTI ::: {}", responseMti);
-        log.info("Formatted Response ::: {}", resp);
-        log.info("Request Information ::: {}", request);
-        log.info("allowed fields ::: {}", allowed);
-        log.info("Preferred Source :::: {}", preferredSource);
-        log.info("template ::: {}", template);
-
         try {
             resp.setType(responseMti);
         } catch (Throwable ignore) {
         }
 
-        // defensive: clear any default/populated fields from the factory before we populate allowed ones
         try {
             pruneResponseFields(resp, Collections.emptySet());
         } catch (Exception ignored) {
@@ -166,20 +165,36 @@ public class AtmTransactionProcessor {
         for (Integer f : allowed) {
             if (f == null || f < 2 || f > 128) continue;
             try {
-                // Only pull values from the original request (exact-match policy)
                 Object val = null;
                 IsoValue<?> srcIsoValue = null;
 
                 if (request != null && safeHasField(request, f)) {
                     val = safeGetObjectValue(request, f);
-                    log.info("The current field selected :::: {}", val);
                     try {
                         srcIsoValue = request.getField(f);
                     } catch (Exception ignore) {
                     }
                 }
 
-                if (val == null) continue; // do not populate from ESB or template
+                // then ESB/preferred source
+                if (val == null && null != null && safeHasField(null, f)) {
+                    val = safeGetObjectValue(null, f);
+                    try {
+                        srcIsoValue = ((IsoMessage) null).getField(f);
+                    } catch (Exception ignore) {
+                    }
+                }
+
+                // then template metadata/value (only for encoder/type/length info or fallback)
+                if (val == null && template != null && safeHasField(template, f)) {
+                    val = safeGetObjectValue(template, f);
+                    try {
+                        srcIsoValue = template.getField(f);
+                    } catch (Exception ignore) {
+                    }
+                }
+
+                if (val == null) continue; // do not populate fields not present in sources
 
                 // byte[] -> BINARY if possible
                 if (val instanceof byte[]) {
@@ -190,13 +205,11 @@ public class AtmTransactionProcessor {
                     }
                 }
 
-                log.info("Src Values ::: {}", srcIsoValue);
-
-                // reuse original IsoValue metadata when available
+                // reuse IsoValue metadata when available
                 if (srcIsoValue != null) {
                     try {
                         IsoType t = srcIsoValue.getType();
-                        int length = srcIsoValue.getLength() > 0 ? srcIsoValue.getLength() : safeToString(val).length();
+                        int length = srcIsoValue.getLength() > 0 ? srcIsoValue.getLength() : Math.max(1, safeToString(val).length());
                         @SuppressWarnings("unchecked")
                         CustomFieldEncoder<Object> enc = (CustomFieldEncoder<Object>) srcIsoValue.getEncoder();
                         if (enc != null) {
@@ -231,19 +244,17 @@ public class AtmTransactionProcessor {
             }
         }
 
-        // Final cleanup: remove any fields that are not explicitly in `allowed`.
+        // ensure nothing outside allowed remains
         try {
             pruneResponseFields(resp, allowed);
         } catch (Exception ignored) {
         }
-
         try {
             removeForbidden127Subfields(resp);
         } catch (Exception ignored) {
         }
         return resp;
     }
-
     // --- Safe logging helpers ------------------------------------------------
 
     private Map<String, Object> buildFieldMapForLog(IsoMessage msg) {
@@ -451,7 +462,8 @@ public class AtmTransactionProcessor {
                 allowed.add(39);
                 if (!truncated.isBlank()) allowed.add(44);
                 // return a clean response with only allowed fields (exact match to request plus 39/44)
-                return buildResponseContainingOnlyAllowed(response.getType(), allowed, request, response, response);
+//                return buildResponseContainingOnlyAllowed(response.getType(), allowed, request, response, response);
+                return null;
             }
         } catch (Exception e) {
             throw new RuntimeException("Unable to create error response", e);
@@ -475,28 +487,32 @@ public class AtmTransactionProcessor {
     }
 
     // pruneResponseFields is retained but not used by default policy
-    @SuppressWarnings("unchecked")
     private void pruneResponseFields(IsoMessage msg, Set<Integer> allowed) {
-        if (msg == null || allowed == null) return;
+        if (msg == null) return;
         for (int f = 1; f <= 128; f++) {
             try {
-                if (!safeHasField(msg, f)) continue;
-                if (allowed.contains(f)) continue;
+                // If allowed contains f -> keep it
+                if (allowed != null && allowed.contains(f)) continue;
 
+                // Try multiple removal APIs / signatures until one succeeds
                 boolean removed = false;
+                Exception lastEx = null;
+
                 try {
-                    Method removeFields = msg.getClass().getMethod("removeFields", int.class);
-                    removeFields.invoke(msg, f);
+                    Method unset = msg.getClass().getMethod("unset", int.class);
+                    unset.invoke(msg, f);
                     removed = true;
-                } catch (Exception ignore) {
+                } catch (Exception e) {
+                    lastEx = e;
                 }
 
                 if (!removed) {
                     try {
-                        Method unset = msg.getClass().getMethod("unset", int.class);
-                        unset.invoke(msg, f);
+                        Method removeFields = msg.getClass().getMethod("removeFields", int.class);
+                        removeFields.invoke(msg, f);
                         removed = true;
-                    } catch (Exception ignore) {
+                    } catch (Exception e) {
+                        lastEx = e;
                     }
                 }
 
@@ -505,21 +521,50 @@ public class AtmTransactionProcessor {
                         Method removeField = msg.getClass().getMethod("removeField", int.class);
                         removeField.invoke(msg, f);
                         removed = true;
-                    } catch (Exception ignore) {
+                    } catch (Exception e) {
+                        lastEx = e;
+                    }
+                }
+
+                if (!removed) {
+                    // Some implementations expect setField(int, IsoValue) or setField(int,Object)
+                    try {
+                        // try setField(int, Object)
+                        Method setFieldObj = msg.getClass().getMethod("setField", int.class, Object.class);
+                        setFieldObj.invoke(msg, f, (Object) null);
+                        removed = true;
+                    } catch (Exception e) {
+                        lastEx = e;
                     }
                 }
 
                 if (!removed) {
                     try {
-                        Method setField = msg.getClass().getMethod("setField", int.class, Object.class);
-                        setField.invoke(msg, f, (Object) null);
+                        // try setField(int, IsoValue)
+                        Method setFieldIso = msg.getClass().getMethod("setField", int.class, IsoValue.class);
+                        setFieldIso.invoke(msg, f, (IsoValue<?>) null);
                         removed = true;
-                    } catch (Exception ignore) {
+                    } catch (Exception e) {
+                        lastEx = e;
                     }
                 }
 
                 if (!removed) {
-                    log.debug("Unable to remove field {} from response (no supported API found)", f);
+                    // Last resort: try setValue with empty value appropriate to common types
+                    try {
+                        Method setValue = msg.getClass().getMethod("setValue", int.class, Object.class, IsoType.class, int.class);
+                        setValue.invoke(msg, f, "", IsoType.LLVAR, 0);
+                        removed = true;
+                    } catch (Exception e) {
+                        lastEx = e;
+                    }
+                }
+
+                if (!removed) {
+                    log.debug("Unable to remove field {} from response (no supported API found). Last error: {}", f, lastEx == null ? "none" : lastEx.getMessage());
+                } else {
+                    // optional debug
+                    log.trace("Pruned field {}", f);
                 }
             } catch (Exception ex) {
                 log.debug("Error pruning field {}: {}", f, ex.getMessage());
