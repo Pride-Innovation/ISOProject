@@ -1,3 +1,4 @@
+// ...existing code...
 package com.pridebank.isoproject.server;
 
 import com.pridebank.isoproject.service.AtmTransactionProcessor;
@@ -23,7 +24,6 @@ import java.net.Socket;
 import java.text.SimpleDateFormat;
 import java.util.Base64;
 import java.util.Date;
-//import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.HashMap;
@@ -116,7 +116,6 @@ public class IsoTcpServer {
 
                 try {
                     IsoMessage request = messageFactory.parseMessage(payload, 0);
-
                     IsoMessage response = processor.processTransaction(request);
 
                     if (response == null) {
@@ -130,7 +129,7 @@ public class IsoTcpServer {
                         log.debug("sanitizeNumericLlFields failed: {}", ex.getMessage());
                     }
 
-                    // Preserve important high fields (102, 123, 127). remove other high fields if present.
+                    // Keep removing stray high-numbered fields as a safeguard, but processor now returns only requested fields.
                     try {
                         for (int f = 99; f <= 128; f++) {
                             if (f == 102 || f == 123 || f == 127) continue; // preserve these
@@ -163,7 +162,6 @@ public class IsoTcpServer {
 
                                     // --- special handling for parent field 127 (composite) ---
                                     if (i == 127) {
-                                        // 1) if solab stored nested IsoMessage for 127, use its raw bytes
                                         try {
                                             IsoValue<?> v127 = response.getField(127);
                                             if (v127 != null) {
@@ -178,7 +176,6 @@ public class IsoTcpServer {
                                                     } catch (Exception ignore) {
                                                     }
                                                 }
-                                                // if inner is byte[] already, pass-through
                                                 if (inner instanceof byte[]) {
                                                     jmsg.set(127, (byte[]) inner);
                                                     continue;
@@ -187,13 +184,11 @@ public class IsoTcpServer {
                                         } catch (Exception ignore) {
                                         }
 
-                                        // 2) if value itself is byte[], pass-through
                                         if (val instanceof byte[]) {
                                             jmsg.set(127, (byte[]) val);
                                             continue;
                                         }
 
-                                        // 3) if value looks like hex string, convert -> bytes
                                         if (val instanceof String) {
                                             String s = ((String) val).trim();
                                             if (s.matches("(?i)^[0-9A-F]+$") && (s.length() % 2 == 0)) {
@@ -201,25 +196,57 @@ public class IsoTcpServer {
                                                 jmsg.set(127, b);
                                                 continue;
                                             }
-                                            // 4) generic fallback: set textual representation (less desirable)
                                             jmsg.set(127, s);
                                             continue;
                                         }
 
-                                        // fallback generic
                                         jmsg.set(127, val.toString());
                                         continue;
                                     }
                                     // --- end 127 handling ---
 
-                                    // Dates -> formatted strings for fields 7/12/13
-                                    if (val instanceof Date) {
-                                        String s;
-                                        if (i == 7) s = F7.format((Date) val);
-                                        else if (i == 12) s = F12.format((Date) val);
-                                        else if (i == 13) s = F13.format((Date) val);
-                                        else s = val.toString();
-                                        jmsg.set(i, s);
+                                    // Fields 7/12/13: provide numeric/formatted values to jPOS
+                                    if (i == 7 || i == 12 || i == 13) {
+                                        String outStr = null;
+                                        try {
+                                            IsoValue<?> orig = response.getField(i);
+                                            if (orig != null) {
+                                                Object inner = orig.getValue();
+                                                if (inner instanceof Date) {
+                                                    if (i == 7) outStr = F7.format((Date) inner);
+                                                    else if (i == 12) outStr = F12.format((Date) inner);
+                                                    else outStr = F13.format((Date) inner);
+                                                } else if (inner instanceof String) {
+                                                    String t = ((String) inner).trim();
+                                                    if (t.matches("\\d+")) outStr = t;
+                                                }
+                                            }
+                                        } catch (Exception ignore) {
+                                        }
+
+                                        try {
+                                            if (outStr == null) {
+                                                if (val instanceof Date) {
+                                                    if (i == 7) outStr = F7.format((Date) val);
+                                                    else if (i == 12) outStr = F12.format((Date) val);
+                                                    else outStr = F13.format((Date) val);
+                                                } else if (val instanceof String && ((String) val).trim().matches("\\d+")) {
+                                                    outStr = ((String) val).trim();
+                                                } else {
+                                                    Date now = new Date();
+                                                    if (i == 7) outStr = F7.format(now);
+                                                    else if (i == 12) outStr = F12.format(now);
+                                                    else outStr = F13.format(now);
+                                                }
+                                            }
+                                        } catch (Exception ignore) {
+                                            if (outStr == null) {
+                                                Date now = new Date();
+                                                outStr = (i == 7) ? F7.format(now) : (i == 12) ? F12.format(now) : F13.format(now);
+                                            }
+                                        }
+
+                                        jmsg.set(i, outStr);
                                         continue;
                                     }
 
@@ -230,7 +257,6 @@ public class IsoTcpServer {
                                             if (cls.toUpperCase().contains("BINARY") || cls.toUpperCase().contains("IFB_BINARY") || cls.toUpperCase().contains("IFA_BINARY")) {
                                                 String s = (String) val;
                                                 if (s.matches("(?i)^[0-9A-F]+$") && (s.length() % 2 == 0)) {
-//                                                    int len = s.length() / 2;
                                                     byte[] b = hexToBytes(s);
                                                     jmsg.set(i, b);
                                                     continue;
@@ -240,7 +266,6 @@ public class IsoTcpServer {
                                         }
                                     }
 
-                                    // number / non-byte default: stringify
                                     if (val instanceof byte[]) {
                                         jmsg.set(i, (byte[]) val);
                                     } else {
@@ -299,12 +324,8 @@ public class IsoTcpServer {
 
     private ISOMsg getIsoMsg(IsoMessage response) {
         ISOMsg jmsg = new ISOMsg();
-        // set MTI from solab type (format as 4-digit numeric string, e.g. 0200)
         try {
             int typeInt = response.getType();
-            // solab type is numeric (e.g. 0x200) - convert to decimal MTI string
-//            String mtiStr = String.format("%04d", typeInt);
-            // solab type is numeric (e.g. 0x200) - convert to 4-digit HEX MTI string ("0200", "0210", "0800", "0810")
             jmsg.setMTI(String.format("%04X", typeInt));
         } catch (Throwable ignore) {
         }
@@ -312,10 +333,6 @@ public class IsoTcpServer {
         return jmsg;
     }
 
-    /**
-     * Ensure fields that the client expects numeric are digits-only and within configured max length.
-     * Does not modify field 70.
-     */
     private void sanitizeNumericLlFields(IsoMessage msg) {
         if (msg == null) return;
 
@@ -367,10 +384,10 @@ public class IsoTcpServer {
 
     private static Map<Integer, Integer> getIntegerIntegerMap() {
         Map<Integer, Integer> llnumMax = new HashMap<>();
-        llnumMax.put(2, 19);   // PAN
+        llnumMax.put(2, 19);
         llnumMax.put(32, 11);
         llnumMax.put(33, 11);
-        llnumMax.put(35, 37);  // track 2 - may include '='; if so remove from map
+        llnumMax.put(35, 37);
         llnumMax.put(99, 11);
         llnumMax.put(100, 11);
         llnumMax.put(101, 17);
@@ -406,5 +423,5 @@ public class IsoTcpServer {
         if (pool != null) pool.shutdownNow();
         log.info("ISO-8583 TCP server stopped");
     }
-
 }
+// ...existing code...
