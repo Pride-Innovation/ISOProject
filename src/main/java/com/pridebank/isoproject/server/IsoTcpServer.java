@@ -240,10 +240,8 @@ public class IsoTcpServer {
                                                 }
                                             }
                                         } catch (Exception ignore) {
-                                            if (outStr == null) {
-                                                Date now = new Date();
-                                                outStr = (i == 7) ? F7.format(now) : (i == 12) ? F12.format(now) : F13.format(now);
-                                            }
+                                            Date now = new Date();
+                                            outStr = (i == 7) ? F7.format(now) : (i == 12) ? F12.format(now) : F13.format(now);
                                         }
 
                                         jmsg.set(i, outStr);

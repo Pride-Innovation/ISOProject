@@ -8,6 +8,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.Map;
 
 @Data
@@ -61,4 +62,36 @@ public class AtmTransactionRequest {
 
     @JsonProperty("rawFields")
     private Map<String, String> rawFields;
+
+    /*
+        Fields for Testing ESB requests
+     */
+
+    @JsonProperty("currency")
+    private String currency = "UGX";
+
+    @JsonProperty("externalRef")
+    private String externalRef;
+
+    @JsonProperty("fee")
+    private Integer fee = 0;
+
+    @JsonProperty("narration")
+    private String narration = "Test ATM Narration";
+
+    @JsonProperty("phoneNo")
+    private String phoneNo = "0779653215";
+
+    @JsonProperty("serviceId")
+    private Integer serviceId = 110;
+
+    @JsonProperty("targetAccount")
+    private String targetAccount = "212206047427801";
+
+    /*
+        Charges
+     */
+
+    @JsonProperty("charges")
+    private List<Charge> charges;
 }

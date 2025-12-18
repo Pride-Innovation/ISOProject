@@ -101,7 +101,13 @@ public class JsonToIsoConverter {
         // Balances -> field 54
         if (resp.getAvailableBalance() != null || resp.getLedgerBalance() != null) {
             // prefer available balance: you may change formatting as needed
-            String bal = formatMinor(resp.getAvailableBalance());
+
+            BigDecimal availableBalance = resp.getAvailableBalance();
+            // Round to the nearest whole number
+            BigDecimal truncatedBalance = availableBalance.setScale(0, RoundingMode.DOWN);
+            log.info("Available Balance ::: {}", truncatedBalance);
+
+            String bal = formatMinor(truncatedBalance);
             response.setValue(54, bal, IsoType.LLLVAR, Math.min(bal.length(), 120));
         }
 
@@ -205,8 +211,10 @@ public class JsonToIsoConverter {
 
     private static String formatMinor(BigDecimal value) {
         if (value == null) return "0";
-        BigDecimal minor = value.movePointRight(2).setScale(0, RoundingMode.HALF_UP);
-        String digits = minor.toPlainString().replaceAll("\\D", "");
+
+        BigDecimal truncatedValue = value.setScale(0, RoundingMode.DOWN);
+        String digits = truncatedValue.toPlainString().replaceAll("\\D", "");
+
         return digits.isEmpty() ? "0" : digits;
     }
 

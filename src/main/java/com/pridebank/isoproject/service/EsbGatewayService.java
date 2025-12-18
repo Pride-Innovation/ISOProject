@@ -1,8 +1,10 @@
+// ...existing code...
 package com.pridebank.isoproject.service;
 
 import com.pridebank.isoproject.client.ESBClient;
 import com.pridebank.isoproject.dto.AtmTransactionRequest;
 import com.pridebank.isoproject.dto.AtmTransactionResponse;
+import com.pridebank.isoproject.dto.Charge;
 import com.solab.iso8583.IsoMessage;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -12,8 +14,13 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
 import java.util.Base64;
+import java.util.Collections;
+import java.util.Date;
+import java.util.Random;
 
 @Service
 @Slf4j
@@ -21,6 +28,7 @@ import java.util.Base64;
 public class EsbGatewayService {
 
     private final ESBClient esbClient;
+    private static final Random random = new Random();
 
     @Value("${esb.username}")
     private String atmUsername;
@@ -30,16 +38,43 @@ public class EsbGatewayService {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    // transaction limit (major units)
+    private static final BigDecimal TRANSACTION_LIMIT_MAJOR = new BigDecimal("5000000");
+    private static final BigDecimal HUNDRED = BigDecimal.valueOf(100);
+    private static final BigDecimal TRANSACTION_LIMIT_MINOR = TRANSACTION_LIMIT_MAJOR.multiply(HUNDRED);
+
     public String sendToEsb(String jsonRequest, IsoMessage isoMessage) {
         try {
 
             log.info("Iso Message ::: {}", isoMessage);
             String authHeader = createBasicAuthHeader(atmUsername, atmPassword);
             AtmTransactionRequest request = objectMapper.readValue(jsonRequest, AtmTransactionRequest.class);
-            log.info("Request Object ::: {}", request);
             String transactionType = request.getTransactionType();
+            log.info("Request Transaction Type ::: {}", transactionType);
+            log.info("Account Number ::: {}", request.getFromAccount());
 
-            System.out.println("Request Type ::: " + transactionType);
+            // ---- pre-check: transaction limit ----
+            try {
+                // determine amount in minor units
+                BigDecimal amountMinor = getBigDecimal(request);
+
+                if (amountMinor != null && amountMinor.compareTo(TRANSACTION_LIMIT_MINOR) > 0) {
+                    log.info("Transaction amount {} (minor) exceeds limit {} (minor) - short-circuiting ESB call",
+                            amountMinor, TRANSACTION_LIMIT_MINOR);
+                    AtmTransactionResponse atmResp = AtmTransactionResponse.builder()
+                            .responseCode("EXCEEDS_LIMIT")
+                            .message("Transaction amount exceeds allowed limit")
+                            .build();
+                    // normalize to expected JSON and return immediately
+                    atmResp.setResponseCode(normalizeResponseCode(atmResp.getResponseCode()));
+                    return objectMapper.writeValueAsString(atmResp);
+                }
+            } catch (Exception e) {
+                log.warn("Failed to evaluate transaction limit, continuing: {}", e.getMessage());
+            }
+
+            request.setExternalRef(generateExternalReference());
+            request.setCharges(Collections.singletonList(processTransactionCharge()));
 
             ResponseEntity<?> response = callESBEndPointBasedOnTransactionType(transactionType, authHeader, request);
 
@@ -69,6 +104,8 @@ public class EsbGatewayService {
                 }
 
                 response.getStatusCode();
+                log.info("Response Status Code ::: {}", response.getStatusCode());
+
                 atmResp = AtmTransactionResponse.builder()
                         .responseCode(response.getStatusCode().is2xxSuccessful() ? "00" : "96")
                         .message(reason)
@@ -87,6 +124,18 @@ public class EsbGatewayService {
             log.error("ESB communication failed", e);
             return createErrorResponse(e.getMessage());
         }
+    }
+
+    private static BigDecimal getBigDecimal(AtmTransactionRequest request) {
+        log.info("Request Amount ::: {}", request.getAmount());
+        BigDecimal amountMinor = null;
+        if (request.getAmount() != null) {
+            amountMinor = request.getAmount().multiply(HUNDRED).setScale(0, RoundingMode.HALF_UP);
+        } else if (request.getAmountMinor() != null && !request.getAmountMinor().isBlank()) {
+            String digits = request.getAmountMinor().replaceAll("[^0-9]", "");
+            if (!digits.isEmpty()) amountMinor = new BigDecimal(digits);
+        }
+        return amountMinor;
     }
 
     private String createBasicAuthHeader(String username, String password) {
@@ -136,7 +185,6 @@ public class EsbGatewayService {
             case "EXCEEDS_LIMIT", "LIMIT_EXCEEDED" -> "61";
             case "AUTH_FAILED", "DECLINED" -> "05";
             case "DUPLICATE" -> "94";
-//            case "TIMEOUT", "UNAVAILABLE", "SERVICE_UNAVAILABLE" -> "96";
             default -> "96";
         };
     }
@@ -147,4 +195,32 @@ public class EsbGatewayService {
         return minor.toPlainString().replaceAll("\\D", "");
     }
 
+    private String generateExternalReference() {
+        long timestamp = System.currentTimeMillis();
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyyMMddHHmmssSSS");
+        String formattedTimestamp = sdf.format(new Date(timestamp));
+
+        String randomLetters = generateRandomLetters();
+
+        String randomDigits = String.format("%05d", random.nextInt(100000));
+        return "Ref " + formattedTimestamp + randomLetters + randomDigits;
+    }
+
+
+    private String generateRandomLetters() {
+        StringBuilder sb = new StringBuilder(5);
+        for (int i = 0; i < 5; i++) {
+            char randomChar = (char) ('A' + random.nextInt(26)); // Random char between A-Z
+            sb.append(randomChar);
+        }
+        return sb.toString();
+    }
+
+    private Charge processTransactionCharge() {
+        return Charge.builder()
+                .amount(100)
+                .description("VAT")
+                .toAccount("212206047427801")
+                .build();
+    }
 }

@@ -192,14 +192,16 @@ public class IsoToJsonConverter {
 
     private String transactionTypeFromProc(String proc) {
         if (proc == null || proc.length() < 2) return "UNKNOWN";
-        String fam = proc.substring(0, 2);
-        return switch (fam) {
-            case "01" -> "WITHDRAWAL";
-            case "02" -> "DEPOSIT";
-            case "03" -> "TRANSFER";
-            case "31" -> "BALANCE_INQUIRY";
-            case "32" -> "MINI_STATEMENT";
-            default -> "OTHER";
-        };
+
+        if (proc.startsWith("00")) return "PURCHASE";
+        if (proc.startsWith("01")) return "WITHDRAWAL";
+        if (proc.startsWith("03")) return "TRANSFER";
+        if (proc.startsWith("31")) return "BALANCE_INQUIRY";
+        if (proc.startsWith("38")) return "MINI_STATEMENT";
+
+        // Generic rule
+        if (proc.startsWith("1")) return "DEPOSIT";
+
+        return "OTHER";
     }
 }
