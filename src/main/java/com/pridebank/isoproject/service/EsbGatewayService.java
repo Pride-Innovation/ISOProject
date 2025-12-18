@@ -1,4 +1,3 @@
-// ...existing code...
 package com.pridebank.isoproject.service;
 
 import com.pridebank.isoproject.client.ESBClient;
@@ -107,7 +106,10 @@ public class EsbGatewayService {
                 log.info("Response Status Code ::: {}", response.getStatusCode());
 
                 atmResp = AtmTransactionResponse.builder()
-                        .responseCode(response.getStatusCode().is2xxSuccessful() ? "00" : "96")
+                        .responseCode(response.getStatusCode().is2xxSuccessful() ? "00" :
+                                response.getStatusCode().is3xxRedirection() ? "51" : // Handle Insufficient Account Balance
+                                        response.getStatusCode().is4xxClientError() ? "14" : // Handle Invalid Account Number
+                                                "96")
                         .message(reason)
                         .build();
             }
