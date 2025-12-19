@@ -1,10 +1,7 @@
 package com.pridebank.isoproject.service;
 
 import com.pridebank.isoproject.client.ESBClient;
-import com.pridebank.isoproject.dto.AtmTransactionRequest;
-import com.pridebank.isoproject.dto.AtmTransactionResponse;
-import com.pridebank.isoproject.dto.Charge;
-import com.pridebank.isoproject.dto.Commission;
+import com.pridebank.isoproject.dto.*;
 import com.solab.iso8583.IsoMessage;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -17,6 +14,8 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 @Service
@@ -84,6 +83,17 @@ public class EsbGatewayService {
                         request.getToAccount(),
                         externalReference
                 ));
+            }
+
+            /*
+                Add Date ranges for mini statement
+             */
+
+            if (Objects.equals(transactionType, "MINI_STATEMENT")) {
+                request.setFromDate(generateStartEndDatesForMinistatement().getFromDate());
+                request.setToDate(generateStartEndDatesForMinistatement().getToDate());
+                // The request will take the account number field for Statement
+                request.setAccountNumber(request.getFromAccount());
             }
 
             ResponseEntity<?> response = callESBEndPointBasedOnTransactionType(transactionType, authHeader, request);
@@ -179,7 +189,7 @@ public class EsbGatewayService {
                 transactionType.equals("DEPOSIT") ? esbClient.DepositRequestPostRequest(authHeader, request) :
                         transactionType.equals("TRANSFER") ? esbClient.TransferRequestPostRequest(authHeader, request) :
                                 transactionType.equals("BALANCE_INQUIRY") ? esbClient.BalanceInquiryRequestPostRequest(authHeader, request) :
-                                        esbClient.MiniStatementRequestPostRequest(authHeader, request);
+                                        transactionType.equals("MINI_STATEMENT") ? esbClient.MiniStatementRequestPostRequest(authHeader, request) : null;
     }
 
     /**
@@ -245,5 +255,20 @@ public class EsbGatewayService {
                 .amount(BigDecimal.valueOf(1000))
                 .description(String.format("Commission for %s", externalReference))
                 .build();
+    }
+
+    private MinistatementDates generateStartEndDatesForMinistatement() {
+        // Generate dates range for three months ago as start date.
+
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd/MM/yyyy");
+
+        LocalDate toDate = LocalDate.now();
+        LocalDate fromDate = toDate.minusMonths(3);
+        return MinistatementDates
+                .builder()
+                .fromDate(fromDate.format(formatter))
+                .toDate(toDate.format(formatter))
+                .build();
+
     }
 }

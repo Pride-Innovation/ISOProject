@@ -97,4 +97,13 @@ public class AtmTransactionRequest {
 
     @JsonProperty("commission")
     private Commission commission;
+
+    /*
+      Mini Statement date range
+     */
+    @JsonProperty("fromDate")
+    private String fromDate;
+
+    @JsonProperty("toDate")
+    private String toDate;
 }

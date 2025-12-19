@@ -23,6 +23,8 @@ public class JsonToIsoConverter {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final IsoMessageBuilder isoMessageBuilder;
+    private static final int MINI_STATEMENT_MAX_RECORDS = 10;
+    private static final int LLLVAR_MAX = 999;
 
     public IsoMessage convert(String jsonResponse, IsoMessage request) throws Exception {
         AtmTransactionResponse resp = objectMapper.readValue(jsonResponse, AtmTransactionResponse.class);
@@ -100,10 +102,9 @@ public class JsonToIsoConverter {
 
         // Balances -> field 54
         if (resp.getAvailableBalance() != null || resp.getLedgerBalance() != null) {
-            // prefer available balance: you may change formatting as needed
-
-            BigDecimal availableBalance = resp.getAvailableBalance();
-            // Round to the nearest whole number
+            // choose available if present otherwise ledger, protect against nulls
+            BigDecimal availableBalance = resp.getAvailableBalance() != null ? resp.getAvailableBalance() : (resp.getLedgerBalance() != null ? resp.getLedgerBalance() : BigDecimal.ZERO);
+            // Round down to whole number for display in field 54
             BigDecimal truncatedBalance = availableBalance.setScale(0, RoundingMode.DOWN);
             log.info("Available Balance ::: {}", truncatedBalance);
 
@@ -116,17 +117,21 @@ public class JsonToIsoConverter {
         boolean isMiniReq = isMinistatementRequest(request);
         if (resp.getMiniStatementText() != null && !resp.getMiniStatementText().isBlank()) {
             String ms = resp.getMiniStatementText();
+            // Ensure length <= LLLVAR_MAX
+            String msTrunc = ms.length() > LLLVAR_MAX ? ms.substring(0, LLLVAR_MAX) : ms;
             if (isMiniReq) {
-                response.setValue(48, ms, IsoType.LLLVAR, Math.min(ms.length(), 999));
+                response.setValue(48, msTrunc, IsoType.LLLVAR, msTrunc.length());
             } else {
-                response.setValue(62, ms, IsoType.LLLVAR, Math.min(ms.length(), 999));
+                response.setValue(62, msTrunc, IsoType.LLLVAR, msTrunc.length());
             }
         } else if (resp.getMiniStatement() != null && !resp.getMiniStatement().isEmpty()) {
             String msText = buildMiniStatementText(resp.getMiniStatement());
+            // buildMiniStatementText already truncates to LLLVAR_MAX, but be defensive here
+            String msTrunc = msText.length() > LLLVAR_MAX ? msText.substring(0, LLLVAR_MAX) : msText;
             if (isMiniReq) {
-                response.setValue(48, msText, IsoType.LLLVAR, Math.min(msText.length(), 999));
+                response.setValue(48, msTrunc, IsoType.LLLVAR, msTrunc.length());
             } else {
-                response.setValue(62, msText, IsoType.LLLVAR, Math.min(msText.length(), 999));
+                response.setValue(62, msTrunc, IsoType.LLLVAR, msTrunc.length());
             }
         }
 
@@ -187,7 +192,9 @@ public class JsonToIsoConverter {
                             } catch (IllegalArgumentException ignored) {
                             }
                         }
-                        response.setValue(fid, val, IsoType.LLLVAR, Math.min(val.length(), 999));
+                        // ensure we never pass a value longer than LLLVAR_MAX
+                        String vToSet = val.length() > LLLVAR_MAX ? val.substring(0, LLLVAR_MAX) : val;
+                        response.setValue(fid, vToSet, IsoType.LLLVAR, Math.min(vToSet.length(), 999));
                     }
                 } catch (Exception ignored) {
                 }
@@ -196,6 +203,7 @@ public class JsonToIsoConverter {
                 int parent = en.getKey();
                 if (response.hasField(parent)) continue;
                 String json = objectMapper.writeValueAsString(en.getValue());
+                if (json.length() > LLLVAR_MAX) json = json.substring(0, LLLVAR_MAX);
                 response.setValue(parent, json, IsoType.LLLVAR, Math.min(json.length(), 999));
             }
         }
@@ -220,6 +228,7 @@ public class JsonToIsoConverter {
 
     // Build ministatement plain-text lines (max 10 records). Each line: YYYY-MM-DD|Narration|+/-Amount|Balance
     private String buildMiniStatementText(Object miniObj) {
+        log.info("Mini Statement :::: {}", miniObj);
         try {
             List<Map<String, Object>> list = objectMapper.convertValue(
                     miniObj,
@@ -227,30 +236,62 @@ public class JsonToIsoConverter {
             );
 
             StringBuilder sb = new StringBuilder();
-            int limit = Math.min(10, list.size());
+            // always take up to the first MINI_STATEMENT_MAX_RECORDS items (first are assumed latest)
+            int limit = Math.min(MINI_STATEMENT_MAX_RECORDS, list.size());
             for (int i = 0; i < limit; i++) {
                 Map<String, Object> rec = list.get(i);
-                String date = firstNonNullString(rec, "date", "transactionDate", "tranDate");
-                String narration = firstNonNullString(rec, "narration", "description", "narr");
+                String date = firstNonNullString(rec, "date", "transactionDate", "tranDate", "txnDate");
+                String narration = firstNonNullString(rec, "narration", "description");
                 String amount = firstNonNullString(rec, "amount", "txnAmount", "amt");
-                String balance = firstNonNullString(rec, "balance", "runningBalance", "bal");
+                String balance = firstNonNullString(rec, "balance", "availableBalance", "bal");
+                String drCrFlag = firstNonNullString(rec, "drCrFlag");
+                String contraAccount = firstNonNullString(rec, "contraAccount");
+                String account = firstNonNullString(rec, "account");
+                String internalRef = firstNonNullString(rec, "internalRef");
+                String currency = firstNonNullString(rec, "currency");
 
                 if (date == null) date = "";
                 if (narration == null) narration = "";
                 if (amount == null) amount = "";
                 if (balance == null) balance = "";
+                if (drCrFlag == null) drCrFlag = "";
+                if (contraAccount == null) contraAccount = "";
+                if (account == null) account = "";
+                if (internalRef == null) internalRef = "";
+                if (currency == null) currency = "";
 
                 amount = normalizeAmountString(amount);
                 balance = normalizeAmountString(balance);
 
-                sb.append(date).append("|").append(narration).append("|").append(amount).append("|").append(balance);
+                sb.append(date)
+                        .append("|")
+                        .append(narration)
+                        .append("|")
+                        .append(amount)
+                        .append("|")
+                        .append(balance)
+                        .append("|")
+                        .append(drCrFlag)
+                        .append("|")
+                        .append(contraAccount)
+                        .append("|")
+                        .append(account)
+                        .append("|")
+                        .append(internalRef)
+                        .append("|")
+                        .append(currency);
                 if (i < limit - 1) sb.append("\n");
             }
-            return sb.toString();
+            String result = sb.toString();
+            // enforce LLLVAR_MAX hard limit
+            if (result.length() > LLLVAR_MAX) {
+                result = result.substring(0, LLLVAR_MAX);
+            }
+            return result;
         } catch (Exception e) {
             try {
                 String json = objectMapper.writeValueAsString(miniObj);
-                return json.length() > 999 ? json.substring(0, 999) : json;
+                return json.length() > LLLVAR_MAX ? json.substring(0, LLLVAR_MAX) : json;
             } catch (Exception ex) {
                 return "";
             }
@@ -314,7 +355,6 @@ public class JsonToIsoConverter {
             case "EXCEEDS_LIMIT", "LIMIT_EXCEEDED" -> "61";
             case "AUTH_FAILED", "DECLINED" -> "05";
             case "DUPLICATE" -> "94";
-//            case "TIMEOUT", "UNAVAILABLE", "SERVICE_UNAVAILABLE" -> "96";
             default -> "96";
         };
     }
