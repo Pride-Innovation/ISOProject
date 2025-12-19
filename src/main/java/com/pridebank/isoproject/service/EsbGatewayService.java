@@ -4,6 +4,7 @@ import com.pridebank.isoproject.client.ESBClient;
 import com.pridebank.isoproject.dto.AtmTransactionRequest;
 import com.pridebank.isoproject.dto.AtmTransactionResponse;
 import com.pridebank.isoproject.dto.Charge;
+import com.pridebank.isoproject.dto.Commission;
 import com.solab.iso8583.IsoMessage;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -16,10 +17,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
-import java.util.Base64;
-import java.util.Collections;
-import java.util.Date;
-import java.util.Random;
+import java.util.*;
 
 @Service
 @Slf4j
@@ -72,8 +70,21 @@ public class EsbGatewayService {
                 log.warn("Failed to evaluate transaction limit, continuing: {}", e.getMessage());
             }
 
-            request.setExternalRef(generateExternalReference());
+            String externalReference = generateExternalReference();
+            request.setExternalRef(externalReference);
+
             request.setCharges(Collections.singletonList(processTransactionCharge()));
+
+            /*
+                Add Commissions for deposits requests
+             */
+
+            if (Objects.equals(transactionType, "DEPOSIT")) {
+                request.setCommission(processTransactionCommission(
+                        request.getToAccount(),
+                        externalReference
+                ));
+            }
 
             ResponseEntity<?> response = callESBEndPointBasedOnTransactionType(transactionType, authHeader, request);
 
@@ -220,9 +231,19 @@ public class EsbGatewayService {
 
     private Charge processTransactionCharge() {
         return Charge.builder()
-                .amount(100)
+                .amount(BigDecimal.valueOf(1000))
                 .description("VAT")
                 .toAccount("212206047427801")
+                .build();
+    }
+
+
+    private Commission processTransactionCommission(String toAccount, String externalReference) {
+        return Commission.builder()
+                .fromAccount("212206047427801")
+                .toAccount(toAccount)
+                .amount(BigDecimal.valueOf(1000))
+                .description(String.format("Commission for %s", externalReference))
                 .build();
     }
 }

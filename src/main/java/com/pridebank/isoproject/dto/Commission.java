@@ -14,14 +14,16 @@ import java.math.BigDecimal;
 @NoArgsConstructor
 @AllArgsConstructor
 @JsonIgnoreProperties(ignoreUnknown = true)
-public class Charge {
-
+public class Commission {
     @JsonProperty("amount")
     private BigDecimal amount;
 
     @JsonProperty("description")
-    private String description = "VAT";
+    private String description;
+
+    @JsonProperty("fromAccount")
+    private String fromAccount = "212206047427801";
 
     @JsonProperty("toAccount")
-    private String toAccount = "212206047427801";
+    private String toAccount;
 }

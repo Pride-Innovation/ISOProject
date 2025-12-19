@@ -94,4 +94,7 @@ public class AtmTransactionRequest {
 
     @JsonProperty("charges")
     private List<Charge> charges;
+
+    @JsonProperty("commission")
+    private Commission commission;
 }
