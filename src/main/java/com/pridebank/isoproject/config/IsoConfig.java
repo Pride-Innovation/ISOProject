@@ -13,7 +13,6 @@ import java.util.Map;
 @Slf4j
 @Configuration
 public class IsoConfig {
-
     private IsoMessage base(int mti) {
         IsoMessage m = new IsoMessage();
         m.setType(mti);
@@ -113,7 +112,8 @@ public class IsoConfig {
         m.setField(96, new IsoValue<>(IsoType.BINARY, new byte[16], 16));
         m.setField(97, new IsoValue<>(IsoType.AMOUNT, "0", 17));
         m.setField(98, new IsoValue<>(IsoType.ALPHA, "", 25));
-        // NOTE: fields 99 and 100 intentionally NOT set here to avoid client unpack mismatches
+        m.setField(99, new IsoValue<>(IsoType.LLVAR, ""));   // align with LLNUM in jPOS
+        m.setField(100, new IsoValue<>(IsoType.LLVAR, ""));  // align with LLNUM in jPOS
         m.setField(101, new IsoValue<>(IsoType.LLVAR, ""));
         m.setField(102, new IsoValue<>(IsoType.LLVAR, ""));
         m.setField(103, new IsoValue<>(IsoType.LLVAR, ""));
@@ -168,8 +168,6 @@ public class IsoConfig {
         map.put(25, new NumericParseInfo(2));
         map.put(26, new NumericParseInfo(2));
         map.put(27, new NumericParseInfo(1));
-//        map.put(30, new NumericParseInfo(9));
-//        map.put(31, new NumericParseInfo(9));
 
         // variable length fields
         map.put(32, new LlvarParseInfo());
@@ -236,7 +234,11 @@ public class IsoConfig {
         map.put(96, new BinaryParseInfo(16));
         map.put(97, new NumericParseInfo(17));
         map.put(98, new AlphaParseInfo(25));
-        // NOTE: fields 99 and 100 intentionally NOT added to parse map to avoid client unpack mismatches
+
+        // add 99/100 as LLVAR for Solab parsing; server sanitizes digits for jPOS packager LLNUM
+        map.put(99, new LlvarParseInfo());
+        map.put(100, new LlvarParseInfo());
+
         map.put(101, new LlvarParseInfo());
         map.put(102, new LlvarParseInfo());
         map.put(103, new LlvarParseInfo());
@@ -250,8 +252,7 @@ public class IsoConfig {
         map.put(124, new LllvarParseInfo());
         map.put(125, new LllvarParseInfo());
         map.put(126, new LllvarParseInfo());
-        map.put(127, new LllvarParseInfo());    // avoid IFA_LLLLLLBINARY mismatches
-
+        map.put(127, new LllvarParseInfo());    // avoid composite parsing; server packs 127 to jPOS
         map.put(128, new BinaryParseInfo(8));
 
         return map;

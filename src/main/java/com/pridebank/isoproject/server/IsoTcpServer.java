@@ -1,4 +1,3 @@
-// ...existing code...
 package com.pridebank.isoproject.server;
 
 import com.pridebank.isoproject.service.AtmTransactionProcessor;
@@ -129,26 +128,7 @@ public class IsoTcpServer {
                         log.debug("sanitizeNumericLlFields failed: {}", ex.getMessage());
                     }
 
-                    // Keep removing stray high-numbered fields as a safeguard, but processor now returns only requested fields.
-                    try {
-                        for (int f = 99; f <= 128; f++) {
-                            if (f == 102 || f == 123 || f == 127) continue; // preserve these
-                            if (response.hasField(f)) {
-                                try {
-                                    response.removeFields(f);
-                                } catch (NoSuchMethodError nsme) {
-                                    try {
-                                        response.removeFields(f);
-                                    } catch (Exception ignored) {
-                                    }
-                                } catch (Exception ignore) {
-                                }
-                                log.debug("Removed field {} from outgoing response to avoid client unpack issues", f);
-                            }
-                        }
-                    } catch (Exception ex) {
-                        log.debug("Failed removing high-numbered fields before send: {}", ex.getMessage());
-                    }
+                    // NOTE: Do NOT prune any fields; preserve exactly what processor set.
 
                     try {
                         if (jposPackager != null) {
@@ -422,4 +402,3 @@ public class IsoTcpServer {
         log.info("ISO-8583 TCP server stopped");
     }
 }
-// ...existing code...

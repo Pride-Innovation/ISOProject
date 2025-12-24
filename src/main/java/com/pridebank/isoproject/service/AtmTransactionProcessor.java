@@ -41,9 +41,36 @@ public class AtmTransactionProcessor {
 
         try {
             Map<String, Object> incomingFields = buildFieldMapForLog(isoRequest);
-            log.info("ISO request fields received (numeric keys only) - MTI={} fields={}", safeGetType(isoRequest), incomingFields);
+            log.info(
+                    "ISO request fields received (numeric keys only) - MTI={} fields={}",
+                    safeGetType(isoRequest),
+                    incomingFields);
         } catch (Exception e) {
             log.warn("Failed safe logging of incoming ISO request: {}", e.getMessage());
+        }
+
+        // --- DIAGNOSTIC: Inspect field 127 specifically and enumerate subfields if present ---
+        try {
+            if (safeHasField(isoRequest, 127)) {
+                Object val127 = safeGetObjectValue(isoRequest, 127);
+                if (val127 == null) {
+                    log.info("Diagnostic: Field 127 is present but value == null");
+                } else if (val127 instanceof IsoMessage nested127) {
+                    Map<String, Object> subfields = buildFieldMapForLog(nested127);
+                    log.info("Diagnostic: Field 127 is a nested IsoMessage with subfields={}", subfields);
+                } else if (val127 instanceof byte[]) {
+                    log.info(
+                            "Diagnostic: Field 127 is raw bytes (base64) length={} data={}",
+                            ((byte[]) val127).length, Base64.getEncoder().encodeToString((byte[]) val127)
+                    );
+                } else {
+                    log.info("Diagnostic: Field 127 value (toString) => {}", safeRenderValue(val127));
+                }
+            } else {
+                log.info("Diagnostic: Field 127 is NOT present on the request");
+            }
+        } catch (Exception ex) {
+            log.warn("Diagnostic: Failed inspecting field 127: {}", ex.getMessage());
         }
 
         int responseMti = safeGetType(isoRequest) + 0x10;
@@ -53,6 +80,16 @@ public class AtmTransactionProcessor {
         } catch (Exception e) {
             log.warn("Failed to create response template from builder; falling back to messageFactory", e);
             responseTemplate = messageFactory.newMessage(responseMti);
+        }
+
+        // NEW: log all fields present in the original request and in the created response template
+        try {
+            Map<String, Object> reqFields = buildFieldMapForLog(isoRequest);
+            Map<String, Object> templateFields = buildFieldMapForLog(responseTemplate);
+            log.info("Detailed ISO request fields (after parsing) - MTI={} fields={}", safeGetType(isoRequest), reqFields);
+            log.info("Response template fields CREATED BY isoMessageBuilder - MTI={} fields={}", safeGetType(responseTemplate), templateFields);
+        } catch (Exception ex) {
+            log.warn("Failed to log request/template fields: {}", ex.getMessage());
         }
 
         try {
@@ -88,6 +125,13 @@ public class AtmTransactionProcessor {
                 );
 
                 log.info("Response MTI status :::: {}", responseMti);
+
+                // log outgoing fields before returning so client-side can see everything
+                try {
+
+                    logIsoMessageFieldsForReturn(finalResp);
+                } catch (Exception ignore) {
+                }
 
                 isoRequest.setType(responseMti);
                 return finalResp;
@@ -229,14 +273,56 @@ public class AtmTransactionProcessor {
                 log.debug("Failed applying transaction-specific population rules: {}", ex.getMessage());
             }
 
+            log.info("Errors Messages Details");
             logIsoMessageFieldsForReturn(finalResp);
 
             return finalResp;
 
         } catch (Exception e) {
-            log.error("Transaction failed - STAN: {}", stan, e);
+            log.error("Transaction failed status - STAN: {}", stan, e);
             return createErrorResponse(isoRequest, "96", "System error");
         }
+    }
+
+    private IsoMessage clone127WithoutForbidden(IsoMessage nested) {
+        log.info("nested fields ::: {}", nested);
+        if (nested == null) return null;
+        IsoMessage copy = new IsoMessage();
+        for (int j = 1; j <= 128; j++) {
+            try {
+                if (!safeHasField(nested, j)) continue;
+                if (j == 22 || j == 25) continue; // never return these
+                IsoValue<?> sv = null;
+                try {
+                    sv = nested.getField(j);
+                } catch (Throwable ignore) {
+                }
+                if (sv != null) {
+                    try {
+                        copy.setField(j, sv.clone());
+                        continue;
+                    } catch (Throwable ignore) {
+                    }
+                }
+                Object v = safeGetObjectValue(nested, j);
+                if (v == null) continue;
+                String sval = safeToString(v);
+                // default LLVAR fallback for nested fields; the TcpServer later packs 127 via jPOS
+                try {
+                    copy.setValue(j, sval, IsoType.LLVAR, Math.min(sval.length(), 999));
+                } catch (Throwable ignore) {
+                    // last-resort: setField via reflection if available
+                    try {
+                        Method setFieldObj = copy.getClass().getMethod("setField", int.class, Object.class);
+                        setFieldObj.invoke(copy, j, sval);
+                    } catch (Exception ignored) {
+                    }
+                }
+            } catch (Exception ex) {
+                // continue copying others even on error
+            }
+        }
+        return copy;
     }
 
     private IsoMessage buildResponseContainingOnlyAllowed(
@@ -259,7 +345,154 @@ public class AtmTransactionProcessor {
         }
 
         if (allowed == null || allowed.isEmpty()) return resp;
+        for (Integer f : allowed) {
+            if (f == null || f < 2 || f > 128) continue;
+            try {
+                // --- Special-case for field 127: mirror nested subfields, exclude 22 and 25 ---
+                if (f == 127) {
+                    Object val127 = null;
+                    IsoValue<?> srcIsoValue127 = null;
 
+                    // prefer request
+                    if (request != null && safeHasField(request, 127)) {
+                        val127 = safeGetObjectValue(request, 127);
+                        try {
+                            srcIsoValue127 = request.getField(127);
+                        } catch (Exception ignore) {
+                        }
+                    }
+                    // then ESB/preferred source
+                    if (val127 == null && preferredSource != null && safeHasField(preferredSource, 127)) {
+                        val127 = safeGetObjectValue(preferredSource, 127);
+                        try {
+                            srcIsoValue127 = preferredSource.getField(127);
+                        } catch (Exception ignore) {
+                        }
+                    }
+                    // then template
+                    if (val127 == null && template != null && safeHasField(template, 127)) {
+                        val127 = safeGetObjectValue(template, 127);
+                        try {
+                            srcIsoValue127 = template.getField(127);
+                        } catch (Exception ignore) {
+                        }
+                    }
+
+                    if (val127 == null) {
+                        // do not add 127 if it was not present in sources
+                        continue;
+                    }
+
+                    try {
+                        if (val127 instanceof IsoMessage nested) {
+                            IsoMessage clean = clone127WithoutForbidden(nested);
+                            if (clean != null) {
+                                // Keep nested IsoMessage so IsoTcpServer can pack via jPOS
+                                resp.setField(127, new IsoValue<>(IsoType.LLLVAR, clean, clean.writeData().length));
+                                // Safety net: ensure removal again
+                                removeForbidden127Subfields(resp);
+                                continue;
+                            }
+                        }
+                        if (val127 instanceof byte[]) {
+                            // Not ideal for further nested manipulation, but valid to mirror exact bytes
+                            resp.setValue(127, val127, IsoType.BINARY, ((byte[]) val127).length);
+                            // Safety net will remove if a nested message becomes available later
+                            removeForbidden127Subfields(resp);
+                            continue;
+                        }
+                        if (val127 instanceof String s) {
+                            // If value is JSON-like strings of subfields, strip 22/25 keys defensively
+                            String edited = s.replaceAll("\"25\"\\s*:\\s*\"[^\"]*\"\\s*,?", "")
+                                    .replaceAll("\"22\"\\s*:\\s*\"[^\"]*\"\\s*,?", "")
+                                    .replaceAll(",\\s*}", "}");
+                            resp.setValue(127, edited, IsoType.LLLVAR, Math.min(edited.length(), 999));
+                            removeForbidden127Subfields(resp);
+                            continue;
+                        }
+                        // Fallback: mirror string representation; TcpServer will not be able to unpack nested cleanly
+                        String sval = safeToString(val127);
+                        resp.setValue(127, sval, IsoType.LLLVAR, Math.min(sval.length(), 999));
+                        removeForbidden127Subfields(resp);
+                        continue;
+                    } catch (Exception ex) {
+                        log.debug("Failed mirroring 127 nested value: {}", ex.getMessage());
+                        // If we cannot safely mirror, skip adding 127 rather than corrupting structure
+                        continue;
+                    }
+                }
+                // --- End special 127 handling ---
+
+                Object val = null;
+                IsoValue<?> srcIsoValue = null;
+                // prefer request
+                if (request != null && safeHasField(request, f)) {
+                    val = safeGetObjectValue(request, f);
+                    try {
+                        srcIsoValue = request.getField(f);
+                    } catch (Exception ignore) {
+                    }
+                }
+                // then ESB/preferred source
+                if (val == null && preferredSource != null && safeHasField(preferredSource, f)) {
+                    val = safeGetObjectValue(preferredSource, f);
+                    try {
+                        srcIsoValue = preferredSource.getField(f);
+                    } catch (Exception ignore) {
+                    }
+                }
+                // then template
+                if (val == null && template != null && safeHasField(template, f)) {
+                    val = safeGetObjectValue(template, f);
+                    try {
+                        srcIsoValue = template.getField(f);
+                    } catch (Exception ignore) {
+                    }
+                }
+                if (val == null) continue;
+
+                if (val instanceof byte[]) {
+                    try {
+                        resp.setValue(f, val, IsoType.BINARY, ((byte[]) val).length);
+                        continue;
+                    } catch (Throwable ignore) {
+                    }
+                }
+
+                if (srcIsoValue != null) {
+                    try {
+                        IsoType t = srcIsoValue.getType();
+                        int length = srcIsoValue.getLength() > 0 ? srcIsoValue.getLength() : Math.max(1, safeToString(val).length());
+                        @SuppressWarnings("unchecked")
+                        CustomFieldEncoder<Object> enc = (CustomFieldEncoder<Object>) srcIsoValue.getEncoder();
+                        if (enc != null) resp.setValue(f, val, enc, t, length);
+                        else resp.setValue(f, val, t, length);
+                        continue;
+                    } catch (Throwable ignore) {
+                    }
+                }
+
+                String sval = safeToString(val);
+                try {
+                    if (f == 39 || f == 38 || f == 11 || f == 37) {
+                        resp.setValue(f, sval, IsoType.ALPHA, Math.min(sval.length(), 12));
+                    } else if (f == 54 || f == 48) {
+                        resp.setValue(f, sval, IsoType.LLLVAR, Math.min(sval.length(), 999));
+                    } else {
+                        resp.setValue(f, sval, IsoType.LLVAR, Math.min(sval.length(), 999));
+                    }
+                } catch (Throwable t) {
+                    try {
+                        Method setField = resp.getClass().getMethod("setField", int.class, Object.class);
+                        setField.invoke(resp, f, sval);
+                    } catch (Exception ignore) {
+                    }
+                }
+            } catch (Exception ex) {
+                log.debug("Failed setting allowed field {} into final response: {}", f, ex.getMessage());
+            }
+        }
+        /*
         for (Integer f : allowed) {
             if (f == null || f < 2 || f > 128) continue;
             try {
@@ -342,7 +575,7 @@ public class AtmTransactionProcessor {
                 log.debug("Failed setting allowed field {} into final response: {}", f, ex.getMessage());
             }
         }
-
+        */
         // Final cleanup: ensure nothing outside allowed remains.
         try {
             pruneResponseFields(resp, allowed);
@@ -363,9 +596,31 @@ public class AtmTransactionProcessor {
         if (msg == null) return map;
         for (int f = 1; f <= 128; f++) {
             try {
-                if (!msg.hasField(f)) continue;
+                if (!safeHasField(msg, f)) continue;
                 Object v = safeGetObjectValue(msg, f);
                 if (v == null) continue;
+
+                // If nested IsoMessage -> add nested map AND dotted keys for each subfield (e.g. "127.002")
+                if (v instanceof IsoMessage nested) {
+                    Map<String, Object> nestedMap = new LinkedHashMap<>();
+                    for (int j = 1; j <= 128; j++) {
+                        try {
+                            if (!safeHasField(nested, j)) continue;
+                            Object nv = safeGetObjectValue(nested, j);
+                            if (nv == null) continue;
+                            Object rendered = safeRenderValue(nv);
+                            nestedMap.put(String.valueOf(j), rendered);
+                            // also expose dotted representation at parent level
+                            map.put(f + "." + j, rendered);
+                        } catch (Exception ex) {
+                            nestedMap.put(String.valueOf(j), Map.of("error", ex.getMessage()));
+                            map.put(f + "." + j, Map.of("error", ex.getMessage()));
+                        }
+                    }
+                    map.put(String.valueOf(f), nestedMap);
+                    continue;
+                }
+
                 map.put(String.valueOf(f), safeRenderValue(v));
             } catch (Exception ex) {
                 map.put(String.valueOf(f), Map.of("error", ex.getMessage()));
@@ -625,11 +880,9 @@ public class AtmTransactionProcessor {
                 }
 
                 if (!removed) {
-                    // Some implementations expect setField(int, IsoValue) or setField(int,Object)
                     try {
-                        // try setField(int, Object)
                         Method setFieldObj = msg.getClass().getMethod("setField", int.class, Object.class);
-                        setFieldObj.invoke(msg, f, (Object) null);
+                        setFieldObj.invoke(msg, f, null);
                         removed = true;
                     } catch (Exception e) {
                         lastEx = e;
@@ -638,9 +891,8 @@ public class AtmTransactionProcessor {
 
                 if (!removed) {
                     try {
-                        // try setField(int, IsoValue)
                         Method setFieldIso = msg.getClass().getMethod("setField", int.class, IsoValue.class);
-                        setFieldIso.invoke(msg, f, (IsoValue<?>) null);
+                        setFieldIso.invoke(msg, f, null);
                         removed = true;
                     } catch (Exception e) {
                         lastEx = e;
@@ -648,7 +900,6 @@ public class AtmTransactionProcessor {
                 }
 
                 if (!removed) {
-                    // Last resort: try setValue with empty value appropriate to common types
                     try {
                         Method setValue = msg.getClass().getMethod("setValue", int.class, Object.class, IsoType.class, int.class);
                         setValue.invoke(msg, f, "", IsoType.LLVAR, 0);
@@ -661,7 +912,6 @@ public class AtmTransactionProcessor {
                 if (!removed) {
                     log.debug("Unable to remove field {} from response (no supported API found). Last error: {}", f, lastEx.getMessage());
                 } else {
-                    // optional debug
                     log.trace("Pruned field {}", f);
                 }
             } catch (Exception ex) {
