@@ -93,9 +93,15 @@ public class EsbGatewayService {
                 request.setFromDate(generateStartEndDatesForMinistatement().getFromDate());
                 request.setToDate(generateStartEndDatesForMinistatement().getToDate());
                 // The request will take the account number field for Statement
-                request.setAccountNumber(request.getFromAccount());
             }
 
+            if (
+                    Objects.equals(transactionType, "MINI_STATEMENT") ||
+                            Objects.equals(transactionType, "BALANCE_INQUIRY")
+            ) {
+                request.setAccountNumber(request.getFromAccount());
+
+            }
             ResponseEntity<?> response = callESBEndPointBasedOnTransactionType(transactionType, authHeader, request);
 
             // Normalize responses here: accept 2xx or structured error body
