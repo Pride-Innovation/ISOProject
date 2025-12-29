@@ -10,31 +10,40 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.jpos.iso.ISOBasePackager;
+import org.jpos.iso.ISOComponent;
+import org.jpos.iso.ISOFieldPackager;
 import org.jpos.iso.ISOMsg;
+import org.jpos.iso.ISOMsgFieldPackager;
+import org.jpos.iso.ISOPackager;
 import org.jpos.iso.packager.GenericPackager;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.PrintStream;
+import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Base64;
 import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.HashMap;
-import java.util.Map;
 
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class IsoTcpServer {
-
     private final MessageFactory<IsoMessage> messageFactory;
     private final AtmTransactionProcessor processor;
+    private final GenericPackager jposPackager;
 
     @Value("${atm.server.port:7790}")
     private int port;
@@ -45,24 +54,29 @@ public class IsoTcpServer {
     @Value("${atm.server.socket.timeout:300000}")
     private int socketTimeoutMs;
 
-    private GenericPackager jposPackager;
-
     private ServerSocket serverSocket;
     private ExecutorService pool;
     private ExecutorService acceptLoop;
 
     @PostConstruct
     public void start() throws Exception {
-        try (InputStream is = getClass().getResourceAsStream("/packager/fields.xml")) {
-            if (is == null) {
-                log.warn("jPOS packager resource /packager/fields.xml not found on classpath; jPOS packing disabled");
-            } else {
-                jposPackager = new GenericPackager(is);
-                log.info("Loaded jPOS GenericPackager from /packager/fields.xml");
+        if (jposPackager != null) {
+            log.info("jPOS GenericPackager injected and ready");
+            // Verify fields.xml defines 127 composite and has a sub-packager
+            try {
+                ISOFieldPackager fp127 = jposPackager.getFieldPackager(127);
+                log.info("Field 127 packager type: {}", (fp127 != null ? fp127.getClass().getName() : "null"));
+                if (fp127 instanceof ISOMsgFieldPackager) {
+                    ISOPackager sub = ((ISOMsgFieldPackager) fp127).getISOMsgPackager();
+                    log.info("Field 127 sub-packager: {}", (sub != null ? sub.getClass().getName() : "null"));
+                } else {
+                    log.warn("Field 127 is not composite (ISOMsgFieldPackager). 127.* subfields will not decode/pack.");
+                }
+            } catch (Exception e) {
+                log.warn("Could not inspect field 127 packager: {}", e.toString());
             }
-        } catch (Exception e) {
-            log.warn("Failed loading jPOS GenericPackager: {}", e.getMessage());
-            jposPackager = null;
+        } else {
+            log.warn("No jPOS GenericPackager bean; server will fall back to solab packing");
         }
 
         if (port <= 0 || port > 65535) {
@@ -106,7 +120,7 @@ public class IsoTcpServer {
                     log.info("Connection closed by {}", remote);
                     break;
                 }
-                int msgLen = ((lenBytes[0] & 0xFF) << 8) | (lenBytes[1] & 0xFF);
+                int msgLen = ((lenBytes[0] & 0xff) << 8) | (lenBytes[1] & 0xff);
                 byte[] payload = in.readNBytes(msgLen);
                 if (payload.length != msgLen) {
                     log.warn("Incomplete message from {}: expected {}, got {}", remote, msgLen, payload.length);
@@ -114,9 +128,138 @@ public class IsoTcpServer {
                 }
 
                 try {
+                    log.info("Inbound payload len={} hex:\n{}", msgLen, bytesToHex(payload));
                     IsoMessage request = messageFactory.parseMessage(payload, 0);
-                    IsoMessage response = processor.processTransaction(request);
 
+                    // Solab-side 127 preview
+                    try {
+                        if (request.hasField(127)) {
+                            IsoValue<?> v127 = request.getField(127);
+                            Object o127 = request.getObjectValue(127);
+                            String type = (v127 != null) ? v127.getType().name() : (o127 != null ? o127.getClass().getSimpleName() : "null");
+                            int len = (o127 instanceof byte[]) ? ((byte[]) o127).length
+                                    : (o127 instanceof String) ? ((String) o127).length()
+                                    : (v127 != null ? v127.getLength() : -1);
+                            log.info("Solab request 127 present: type={} length={}", type, len);
+                            if (o127 instanceof String s && !s.isBlank()) {
+                                log.info("Solab request 127 string preview: {}", s.substring(0, Math.min(s.length(), 200)));
+                            }
+                        } else {
+                            log.info("Solab request 127 absent after parseMessage");
+                        }
+                    } catch (Exception e) {
+                        log.debug("Solab 127 logging failed: {}", e.getMessage());
+                    }
+
+                    // Capture inbound composite 127 via jPOS
+                    ISOMsg inbound127 = null;
+
+                    if (jposPackager != null) {
+                        try {
+                            ISOMsg jReq = new ISOMsg();
+                            jReq.setPackager(jposPackager);
+                            jReq.unpack(payload);
+
+                            // Full inbound dump
+                            try {
+                                ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                                PrintStream ps = new PrintStream(bos);
+                                jReq.dump(ps, "");
+                                ps.flush();
+                                log.info("jPOS inbound full dump:\n{}", bos.toString(StandardCharsets.UTF_8));
+                            } catch (Exception e) {
+                                log.debug("Failed jPOS inbound dump: {}", e.getMessage());
+                            }
+
+                            ISOPackager sub = getF127SubPackager(jposPackager);
+
+                            if (jReq.hasField(127)) {
+                                byte[] b127 = null;
+                                ISOComponent comp127 = jReq.getComponent(127);
+
+                                if (comp127 instanceof ISOMsg) {
+                                    ISOMsg nested = (ISOMsg) comp127;
+                                    inbound127 = nested;
+
+                                    if (nested.getPackager() == null && sub != null) {
+                                        nested.setPackager(sub);
+                                        log.info("Set sub-packager on inbound 127 nested msg: {}", sub.getClass().getName());
+                                    } else {
+                                        log.info("Inbound 127 nested packager present? {}", (nested.getPackager() != null));
+                                    }
+
+                                    // Nested 127 dump
+                                    try {
+                                        ByteArrayOutputStream bos2 = new ByteArrayOutputStream();
+                                        PrintStream ps2 = new PrintStream(bos2);
+                                        nested.dump(ps2, "  127.");
+                                        ps2.flush();
+                                        log.info("jPOS inbound 127 dump:\n{}", bos2.toString(StandardCharsets.UTF_8));
+                                    } catch (Exception e) {
+                                        log.debug("Failed jPOS nested 127 dump: {}", e.getMessage());
+                                    }
+
+                                    // Prune 22/25 on inbound composite for echo safety
+                                    try {
+                                        nested.unset(22);
+                                        nested.unset(25);
+                                        log.info("Captured inbound composite 127; pruned 22/25");
+                                    } catch (Exception ignore) {
+                                    }
+
+                                    try {
+                                        b127 = (sub != null) ? nested.pack() : jReq.getBytes(127);
+                                    } catch (Exception packEx) {
+                                        log.debug("Nested 127 pack failed: {}", packEx.getMessage());
+                                    }
+                                } else {
+                                    try {
+                                        b127 = jReq.getBytes(127);
+                                    } catch (Exception ignore) {
+                                    }
+                                    log.info("jPOS inbound: component 127 is {}",
+                                            (comp127 != null ? comp127.getClass().getName() : "null"));
+                                }
+
+                                int len = (b127 != null) ? b127.length : 0;
+                                log.info("Inbound 127 bytes len={} hex={}", len, (b127 != null ? bytesToHex(b127) : ""));
+
+                                if (sub != null && b127 != null && b127.length > 0) {
+                                    try {
+                                        ISOMsg nestedDec = new ISOMsg();
+                                        nestedDec.setPackager(sub);
+                                        nestedDec.unpack(b127);
+                                        Map<String, Object> in127 = new LinkedHashMap<>();
+                                        for (int s = 1; s <= 128; s++) {
+                                            if (!nestedDec.hasField(s)) continue;
+                                            Object v = nestedDec.getValue(s);
+                                            String key = String.format("127.%03d", s);
+                                            in127.put(key, (v instanceof byte[])
+                                                    ? "B64:" + Base64.getEncoder().encodeToString((byte[]) v)
+                                                    : nestedDec.getString(s));
+                                        }
+                                        log.info("Inbound 127 subfields: {}", in127);
+                                    } catch (Exception e) {
+                                        log.debug("Failed unpacking inbound 127 subfields: {}", e.getMessage());
+                                    }
+                                } else if (sub == null) {
+                                    log.warn("No 127 sub-packager; inbound 127 preview limited to raw bytes.");
+                                }
+
+                                // Inject raw bytes into Solab request (best-effort)
+                                if (b127 != null && b127.length > 0) {
+                                    request.setValue(127, b127, IsoType.BINARY, b127.length);
+                                    log.debug("Injected raw 127 bytes into Solab request: len={}", b127.length);
+                                }
+                            } else {
+                                log.info("jPOS inbound: field 127 absent");
+                            }
+                        } catch (Exception decodeEx) {
+                            log.debug("Failed pre-decoding 127 via jPOS: {}", decodeEx.getMessage());
+                        }
+                    }
+
+                    IsoMessage response = processor.processTransaction(request);
                     if (response == null) {
                         log.warn("Processor returned null response for {}", remote);
                         continue;
@@ -128,11 +271,11 @@ public class IsoTcpServer {
                         log.debug("sanitizeNumericLlFields failed: {}", ex.getMessage());
                     }
 
-                    // NOTE: Do NOT prune any fields; preserve exactly what processor set.
-
                     try {
                         if (jposPackager != null) {
                             ISOMsg jmsg = getIsoMsg(response);
+
+                            boolean attached127 = false;
 
                             for (int i = 2; i <= 128; i++) {
                                 try {
@@ -140,52 +283,104 @@ public class IsoTcpServer {
                                     Object val = response.getObjectValue(i);
                                     if (val == null) continue;
 
-                                    // --- special handling for parent field 127 (composite) ---
                                     if (i == 127) {
                                         try {
                                             IsoValue<?> v127 = response.getField(127);
-                                            if (v127 != null) {
-                                                Object inner = v127.getValue();
-                                                if (inner instanceof IsoMessage) {
-                                                    try {
-                                                        byte[] nested = ((IsoMessage) inner).writeData();
-                                                        if (nested != null && nested.length > 0) {
-                                                            jmsg.set(127, nested);
-                                                            continue;
+                                            Object inner = (v127 != null) ? v127.getValue() : val;
+
+                                            ISOPackager sub = getF127SubPackager(jposPackager);
+                                            if (inner instanceof IsoMessage && sub != null) {
+                                                try {
+                                                    IsoMessage nestedSolab = (IsoMessage) inner;
+                                                    ISOMsg nestedJ = new ISOMsg(127);
+                                                    nestedJ.setPackager(sub);
+                                                    for (int s = 1; s <= 128; s++) {
+                                                        try {
+                                                            if (!nestedSolab.hasField(s)) continue;
+                                                            Object nv = nestedSolab.getObjectValue(s);
+                                                            if (nv == null) continue;
+                                                            if (nv instanceof byte[]) nestedJ.set(s, (byte[]) nv);
+                                                            else nestedJ.set(s, nv.toString());
+                                                        } catch (Exception ignore) {
                                                         }
+                                                    }
+                                                    try {
+                                                        nestedJ.unset(22);
+                                                        nestedJ.unset(25);
                                                     } catch (Exception ignore) {
                                                     }
-                                                }
-                                                if (inner instanceof byte[]) {
-                                                    jmsg.set(127, (byte[]) inner);
+                                                    try {
+                                                        ByteArrayOutputStream bos3 = new ByteArrayOutputStream();
+                                                        PrintStream ps3 = new PrintStream(bos3);
+                                                        nestedJ.dump(ps3, "OUT 127.");
+                                                        ps3.flush();
+                                                        log.info("Prepared outbound composite 127 dump:\n{}", bos3.toString(StandardCharsets.UTF_8));
+                                                    } catch (Exception e) {
+                                                        log.debug("Failed outbound nested 127 dump: {}", e.getMessage());
+                                                    }
+                                                    jmsg.set(nestedJ);
+                                                    attached127 = true;
+                                                    log.info("Attached composite 127 via component API");
                                                     continue;
+                                                } catch (Exception ignore) {
                                                 }
                                             }
-                                        } catch (Exception ignore) {
-                                        }
 
-                                        if (val instanceof byte[]) {
-                                            jmsg.set(127, (byte[]) val);
-                                            continue;
-                                        }
-
-                                        if (val instanceof String) {
-                                            String s = ((String) val).trim();
-                                            if (s.matches("(?i)^[0-9A-F]+$") && (s.length() % 2 == 0)) {
-                                                byte[] b = hexToBytes(s);
+                                            if (inner instanceof IsoMessage) {
+                                                try {
+                                                    byte[] nested = ((IsoMessage) inner).writeData();
+                                                    if (nested != null && nested.length > 0) {
+                                                        jmsg.set(127, nested);
+                                                        attached127 = true;
+                                                        continue;
+                                                    }
+                                                } catch (Exception ignore) {
+                                                }
+                                            }
+                                            if (inner instanceof byte[]) {
+                                                byte[] b = (byte[]) inner;
+                                                ISOPackager subz = getF127SubPackager(jposPackager);
+                                                if (subz != null) {
+                                                    try {
+                                                        ISOMsg prune = new ISOMsg();
+                                                        prune.setPackager(subz);
+                                                        prune.unpack(b);
+                                                        prune.unset(22);
+                                                        prune.unset(25);
+                                                        b = prune.pack();
+                                                    } catch (Exception ignore) {
+                                                    }
+                                                } else {
+                                                    log.warn("No 127 sub-packager; sending raw 127 bytes");
+                                                }
                                                 jmsg.set(127, b);
+                                                attached127 = true;
                                                 continue;
                                             }
-                                            jmsg.set(127, s);
+                                            if (val instanceof byte[]) {
+                                                jmsg.set(127, (byte[]) val);
+                                                attached127 = true;
+                                                continue;
+                                            }
+                                            if (val instanceof String) {
+                                                String s = ((String) val).trim();
+                                                if (s.matches("(?i)^[0-9A-F]+$") && (s.length() % 2 == 0)) {
+                                                    byte[] b = hexToBytes(s);
+                                                    jmsg.set(127, b);
+                                                    attached127 = true;
+                                                    continue;
+                                                }
+                                                jmsg.set(127, s);
+                                                attached127 = true;
+                                                continue;
+                                            }
+                                            jmsg.set(127, val.toString());
+                                            attached127 = true;
                                             continue;
+                                        } catch (Exception ignore) {
                                         }
-
-                                        jmsg.set(127, val.toString());
-                                        continue;
                                     }
-                                    // --- end 127 handling ---
 
-                                    // Fields 7/12/13: provide numeric/formatted values to jPOS
                                     if (i == 7 || i == 12 || i == 13) {
                                         String outStr = null;
                                         try {
@@ -228,7 +423,6 @@ public class IsoTcpServer {
                                         continue;
                                     }
 
-                                    // When target packager expects binary, convert hex string -> bytes if appropriate
                                     if (val instanceof String) {
                                         try {
                                             String cls = jposPackager.getFieldPackager(i).getClass().getSimpleName();
@@ -254,19 +448,80 @@ public class IsoTcpServer {
                                 }
                             }
 
+                            // Fallback: use inbound composite 127
+                            if (!attached127 && inbound127 != null) {
+                                try {
+                                    if (inbound127.getFieldNumber() != 127) inbound127.setFieldNumber(127);
+                                    if (inbound127.getPackager() == null) {
+                                        ISOPackager sub = getF127SubPackager(jposPackager);
+                                        if (sub != null) inbound127.setPackager(sub);
+                                    }
+                                    try {
+                                        inbound127.unset(22);
+                                        inbound127.unset(25);
+                                    } catch (Exception ignore) {
+                                    }
+                                    jmsg.set(inbound127);
+                                    log.info("Using inbound composite 127 in response");
+                                } catch (Exception e) {
+                                    log.debug("Failed attaching inbound 127 to response: {}", e.getMessage());
+                                }
+                            }
+
+                            // Outbound full dump + 127 preview
+                            try {
+                                ByteArrayOutputStream bosOut = new ByteArrayOutputStream();
+                                PrintStream psOut = new PrintStream(bosOut);
+                                jmsg.dump(psOut, "OUT ");
+                                psOut.flush();
+                                log.info("jPOS outbound full dump:\n{}", bosOut.toString(StandardCharsets.UTF_8));
+                            } catch (Exception e) {
+                                log.debug("Failed outbound full dump: {}", e.getMessage());
+                            }
+
+                            try {
+                                if (jmsg.hasField(127)) {
+                                    byte[] b127 = jmsg.getBytes(127);
+                                    ISOPackager sub = getF127SubPackager(jposPackager);
+                                    if (sub != null && b127 != null && b127.length > 0) {
+                                        ISOMsg nested = new ISOMsg();
+                                        nested.setPackager(sub);
+                                        nested.unpack(b127);
+
+                                        Map<String, Object> out127 = new LinkedHashMap<>();
+                                        for (int s = 1; s <= 128; s++) {
+                                            if (!nested.hasField(s)) continue;
+                                            Object v = nested.getValue(s);
+                                            String key = String.format("127.%03d", s);
+                                            out127.put(key, (v instanceof byte[])
+                                                    ? "B64:" + Base64.getEncoder().encodeToString((byte[]) v)
+                                                    : nested.getString(s));
+                                        }
+                                        log.info("Outgoing 127 subfields: {}", out127);
+                                    } else {
+                                        log.info("Outgoing 127 raw (hex): {}", (b127 != null ? bytesToHex(b127) : ""));
+                                        if (sub == null)
+                                            log.warn("No 127 sub-packager; sent raw 127 bytes without subfields preview.");
+                                    }
+                                } else {
+                                    log.warn("Outgoing 127 absent on jPOS response");
+                                }
+                            } catch (Exception e) {
+                                log.debug("Failed logging outgoing 127 subfields: {}", e.getMessage());
+                            }
+
                             byte[] jposBytes = jmsg.pack();
                             log.debug("jPOS-packed outgoing response length={} bytes. Hex:\n{}", jposBytes.length, bytesToHex(jposBytes));
                             log.debug("Outgoing response (base64): {}", Base64.getEncoder().encodeToString(jposBytes));
 
-                            out.write((jposBytes.length >> 8) & 0xFF);
-                            out.write(jposBytes.length & 0xFF);
+                            out.write((jposBytes.length >> 8) & 0xff);
+                            out.write(jposBytes.length & 0xff);
                             out.write(jposBytes);
                             out.flush();
                         } else {
-                            // fallback to solab bytes
                             byte[] toSend = response.writeData();
-                            out.write((toSend.length >> 8) & 0xFF);
-                            out.write(toSend.length & 0xFF);
+                            out.write((toSend.length >> 8) & 0xff);
+                            out.write((toSend.length) & 0xff);
                             out.write(toSend);
                             out.flush();
                         }
@@ -274,8 +529,8 @@ public class IsoTcpServer {
                         log.error("Failed to pack/send response via jPOS; attempting to send solab bytes", sendEx);
                         try {
                             byte[] toSend = response.writeData();
-                            out.write((toSend.length >> 8) & 0xFF);
-                            out.write(toSend.length & 0xFF);
+                            out.write((toSend.length >> 8) & 0xff);
+                            out.write((toSend.length) & 0xff);
                             out.write(toSend);
                             out.flush();
                         } catch (Exception ex) {
@@ -288,8 +543,8 @@ public class IsoTcpServer {
                     byte[] respBytes = errorResp.writeData();
 
                     log.warn("Sending parse-error response (hex): {}", bytesToHex(respBytes));
-                    out.write((respBytes.length >> 8) & 0xFF);
-                    out.write(respBytes.length & 0xFF);
+                    out.write((respBytes.length >> 8) & 0xff);
+                    out.write(respBytes.length & 0xff);
                     out.write(respBytes);
                     out.flush();
                     log.error("Parse error from {}: {}", remote, pe.getMessage(), pe);
@@ -320,7 +575,7 @@ public class IsoTcpServer {
             int fld = e.getKey();
             int maxLen = e.getValue();
             try {
-                if (fld == 70) continue;            // do not alter network management code
+                if (fld == 70) continue;
                 if (!msg.hasField(fld)) continue;
 
                 Object raw = msg.getObjectValue(fld);
@@ -361,7 +616,7 @@ public class IsoTcpServer {
     }
 
     private static Map<Integer, Integer> getIntegerIntegerMap() {
-        Map<Integer, Integer> llnumMax = new HashMap<>();
+        Map<Integer, Integer> llnumMax = new java.util.HashMap<>();
         llnumMax.put(2, 19);
         llnumMax.put(32, 11);
         llnumMax.put(33, 11);
@@ -376,6 +631,7 @@ public class IsoTcpServer {
     }
 
     private static String bytesToHex(byte[] bytes) {
+        if (bytes == null) return "";
         StringBuilder sb = new StringBuilder(bytes.length * 2);
         for (byte b : bytes) sb.append(String.format("%02X", b));
         return sb.toString();
@@ -400,5 +656,23 @@ public class IsoTcpServer {
         if (acceptLoop != null) acceptLoop.shutdownNow();
         if (pool != null) pool.shutdownNow();
         log.info("ISO-8583 TCP server stopped");
+    }
+
+    // Safe public-API helper: uses getISOMsgPackager()
+    private ISOPackager getF127SubPackager(ISOPackager root) {
+        if (!(root instanceof GenericPackager)) return null;
+        try {
+            ISOFieldPackager fp = ((GenericPackager) root).getFieldPackager(127);
+            if (fp instanceof ISOMsgFieldPackager) {
+                ISOPackager sub = ((ISOMsgFieldPackager) fp).getISOMsgPackager();
+                if (sub != null) return sub;
+                log.warn("127 sub-packager is null");
+            } else {
+                log.warn("Field 127 is not composite (ISOMsgFieldPackager). Check fields.xml.");
+            }
+        } catch (Exception e) {
+            log.warn("Failed to fetch 127 sub-packager: {}", e.toString());
+        }
+        return null;
     }
 }

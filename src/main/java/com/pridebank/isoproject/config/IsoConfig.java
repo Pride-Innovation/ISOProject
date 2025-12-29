@@ -4,9 +4,11 @@ import com.solab.iso8583.*;
 import com.solab.iso8583.parse.*;
 import com.solab.iso8583.parse.date.Date10ParseInfo;
 import lombok.extern.slf4j.Slf4j;
+import org.jpos.iso.packager.GenericPackager;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+import java.io.InputStream;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -16,9 +18,7 @@ public class IsoConfig {
     private IsoMessage base(int mti) {
         IsoMessage m = new IsoMessage();
         m.setType(mti);
-
-        // common fields (align with provided fields.xml)
-        m.setField(2, new IsoValue<>(IsoType.LLVAR, ""));            // PAN up to 19
+        m.setField(2, new IsoValue<>(IsoType.LLVAR, ""));
         m.setField(3, new IsoValue<>(IsoType.NUMERIC, "000000", 6));
         m.setField(4, new IsoValue<>(IsoType.NUMERIC, "000000000000", 12));
         m.setField(28, new IsoValue<>(IsoType.ALPHA, "C00000000", 9));
@@ -103,7 +103,7 @@ public class IsoConfig {
         m.setField(87, new IsoValue<>(IsoType.NUMERIC, "0", 16));
         m.setField(88, new IsoValue<>(IsoType.NUMERIC, "0", 16));
         m.setField(89, new IsoValue<>(IsoType.NUMERIC, "0", 16));
-        m.setField(90, new IsoValue<>(IsoType.LLVAR, "")); // safer for variable original data
+        m.setField(90, new IsoValue<>(IsoType.LLVAR, ""));
         m.setField(91, new IsoValue<>(IsoType.ALPHA, " ", 1));
         m.setField(92, new IsoValue<>(IsoType.ALPHA, "  ", 2));
         m.setField(93, new IsoValue<>(IsoType.ALPHA, "      ", 6));
@@ -112,8 +112,8 @@ public class IsoConfig {
         m.setField(96, new IsoValue<>(IsoType.BINARY, new byte[16], 16));
         m.setField(97, new IsoValue<>(IsoType.AMOUNT, "0", 17));
         m.setField(98, new IsoValue<>(IsoType.ALPHA, "", 25));
-        m.setField(99, new IsoValue<>(IsoType.LLVAR, ""));   // align with LLNUM in jPOS
-        m.setField(100, new IsoValue<>(IsoType.LLVAR, ""));  // align with LLNUM in jPOS
+        m.setField(99, new IsoValue<>(IsoType.LLVAR, ""));
+        m.setField(100, new IsoValue<>(IsoType.LLVAR, ""));
         m.setField(101, new IsoValue<>(IsoType.LLVAR, ""));
         m.setField(102, new IsoValue<>(IsoType.LLVAR, ""));
         m.setField(103, new IsoValue<>(IsoType.LLVAR, ""));
@@ -134,7 +134,6 @@ public class IsoConfig {
     private Map<Integer, FieldParseInfo> parseMap0200() {
         Map<Integer, FieldParseInfo> map = new HashMap<>();
 
-        // core numeric/amount/date fields
         map.put(2, new LlvarParseInfo());
         map.put(3, new NumericParseInfo(6));
         map.put(4, new NumericParseInfo(12));
@@ -142,7 +141,6 @@ public class IsoConfig {
         map.put(6, new NumericParseInfo(12));
         map.put(7, new Date10ParseInfo());
 
-        // allow non-digit 'C' prefixed amounts by using ALPHA parse for 28-31
         map.put(28, new AlphaParseInfo(9));
         map.put(29, new AlphaParseInfo(9));
         map.put(30, new AlphaParseInfo(9));
@@ -169,7 +167,6 @@ public class IsoConfig {
         map.put(26, new NumericParseInfo(2));
         map.put(27, new NumericParseInfo(1));
 
-        // variable length fields
         map.put(32, new LlvarParseInfo());
         map.put(33, new LlvarParseInfo());
         map.put(34, new LlvarParseInfo());
@@ -204,7 +201,6 @@ public class IsoConfig {
         map.put(63, new LllvarParseInfo());
         map.put(64, new BinaryParseInfo(8));
 
-        // extended / response / reversal fields
         map.put(70, new NumericParseInfo(3));
         map.put(71, new NumericParseInfo(4));
         map.put(72, new NumericParseInfo(4));
@@ -225,7 +221,7 @@ public class IsoConfig {
         map.put(87, new NumericParseInfo(16));
         map.put(88, new NumericParseInfo(16));
         map.put(89, new NumericParseInfo(16));
-        map.put(90, new LlvarParseInfo());        // parse original data elements as LLVAR to be safe
+        map.put(90, new LlvarParseInfo());
         map.put(91, new AlphaParseInfo(1));
         map.put(92, new AlphaParseInfo(2));
         map.put(93, new AlphaParseInfo(6));
@@ -235,7 +231,6 @@ public class IsoConfig {
         map.put(97, new NumericParseInfo(17));
         map.put(98, new AlphaParseInfo(25));
 
-        // add 99/100 as LLVAR for Solab parsing; server sanitizes digits for jPOS packager LLNUM
         map.put(99, new LlvarParseInfo());
         map.put(100, new LlvarParseInfo());
 
@@ -244,7 +239,6 @@ public class IsoConfig {
         map.put(103, new LlvarParseInfo());
         map.put(104, new LllvarParseInfo());
 
-        // safety: large private/reserved fields as LLLVAR so parser won't attempt incompatible nested binary parsing.
         map.put(120, new LllvarParseInfo());
         map.put(121, new LllvarParseInfo());
         map.put(122, new LllvarParseInfo());
@@ -252,7 +246,7 @@ public class IsoConfig {
         map.put(124, new LllvarParseInfo());
         map.put(125, new LllvarParseInfo());
         map.put(126, new LllvarParseInfo());
-        map.put(127, new LllvarParseInfo());    // avoid composite parsing; server packs 127 to jPOS
+        map.put(127, new LllvarParseInfo());
         map.put(128, new BinaryParseInfo(8));
 
         return map;
@@ -290,7 +284,6 @@ public class IsoConfig {
         f.setUseBinaryBitmap(true);
         f.setIgnoreLastMissingField(true);
 
-        // templates
         f.addMessageTemplate(base(0x200));
         f.addMessageTemplate(base(0x210));
         f.addMessageTemplate(base(0x0231));
@@ -299,7 +292,6 @@ public class IsoConfig {
         f.addMessageTemplate(base(0x420));
         f.addMessageTemplate(base(0x430));
 
-        // parse maps
         f.setParseMap(0x200, parseMap0200());
         f.setParseMap(0x210, parseMap0210());
         f.setParseMap(0x0231, parseMap0231());
@@ -310,5 +302,21 @@ public class IsoConfig {
 
         log.info("✓ Programmatic MessageFactory ready (templates: 0200,0210,0231,0800,0810,0420,0430)");
         return f;
+    }
+
+    @Bean
+    public GenericPackager jposGenericPackager() {
+        try (InputStream is = getClass().getResourceAsStream("/packager/fields.xml")) {
+            if (is == null) {
+                log.warn("jPOS packager resource /packager/fields.xml not found; jPOS features disabled");
+                return null;
+            }
+            GenericPackager packager = new GenericPackager(is);
+            log.info("Loaded jPOS GenericPackager from /packager/fields.xml");
+            return packager;
+        } catch (Exception e) {
+            log.warn("Failed to load jPOS GenericPackager: {}", e.getMessage());
+            return null;
+        }
     }
 }
