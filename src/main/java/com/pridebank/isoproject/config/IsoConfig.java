@@ -52,7 +52,8 @@ public class IsoConfig {
         m.setField(32, new IsoValue<>(IsoType.LLVAR, ""));
         m.setField(33, new IsoValue<>(IsoType.LLVAR, ""));
         m.setField(34, new IsoValue<>(IsoType.LLVAR, ""));
-        m.setField(35, new IsoValue<>(IsoType.LLVAR, ""));
+        // Do NOT pre-seed 35 (prevents empty LLVAR with bit set)
+        // m.setField(35, new IsoValue<>(IsoType.LLVAR, ""));
         m.setField(36, new IsoValue<>(IsoType.LLLVAR, ""));
         m.setField(37, new IsoValue<>(IsoType.ALPHA, "", 12));
         m.setField(38, new IsoValue<>(IsoType.ALPHA, "      ", 6));
@@ -170,7 +171,7 @@ public class IsoConfig {
         map.put(32, new LlvarParseInfo());
         map.put(33, new LlvarParseInfo());
         map.put(34, new LlvarParseInfo());
-        map.put(35, new LlvarParseInfo());
+        map.put(35, new LlvarParseInfo()); // LLVAR Track-2 parsed; packing handled by jPOS fields.xml
         map.put(36, new LllvarParseInfo());
         map.put(37, new AlphaParseInfo(12));
         map.put(38, new AlphaParseInfo(6));

@@ -60,7 +60,6 @@ public class IsoTcpServer {
     public void start() throws Exception {
         if (jposPackager != null) {
             log.info("jPOS GenericPackager injected and ready");
-            // Verify fields.xml defines 127 composite and has a sub-packager
             try {
                 ISOFieldPackager fp127 = jposPackager.getFieldPackager(127);
                 log.info("Field 127 packager type: {}", (fp127 != null ? fp127.getClass().getName() : "null"));
@@ -129,7 +128,6 @@ public class IsoTcpServer {
                     log.info("Inbound payload len={} hex:\n{}", msgLen, bytesToHex(payload));
                     IsoMessage request = messageFactory.parseMessage(payload, 0);
 
-                    // Solab-side 127 preview
                     try {
                         if (request.hasField(127)) {
                             IsoValue<?> v127 = request.getField(127);
@@ -149,7 +147,6 @@ public class IsoTcpServer {
                         log.debug("Solab 127 logging failed: {}", e.getMessage());
                     }
 
-                    // Capture inbound composite 127 via jPOS
                     ISOMsg inbound127 = null;
 
                     if (jposPackager != null) {
@@ -158,7 +155,6 @@ public class IsoTcpServer {
                             jReq.setPackager(jposPackager);
                             jReq.unpack(payload);
 
-                            // Full inbound dump
                             try {
                                 ByteArrayOutputStream bos = new ByteArrayOutputStream();
                                 PrintStream ps = new PrintStream(bos);
@@ -186,7 +182,6 @@ public class IsoTcpServer {
                                         log.info("Inbound 127 nested packager present? {}", (nested.getPackager() != null));
                                     }
 
-                                    // Nested 127 dump
                                     try {
                                         ByteArrayOutputStream bos2 = new ByteArrayOutputStream();
                                         PrintStream ps2 = new PrintStream(bos2);
@@ -197,7 +192,6 @@ public class IsoTcpServer {
                                         log.debug("Failed jPOS nested 127 dump: {}", e.getMessage());
                                     }
 
-                                    // Prune 22/25 on inbound composite for echo safety
                                     try {
                                         nested.unset(22);
                                         nested.unset(25);
@@ -244,7 +238,6 @@ public class IsoTcpServer {
                                     log.warn("No 127 sub-packager; inbound 127 preview limited to raw bytes.");
                                 }
 
-                                // Inject raw bytes into Solab request (best-effort)
                                 if (b127 != null && b127.length > 0) {
                                     request.setValue(127, b127, IsoType.BINARY, b127.length);
                                     log.debug("Injected raw 127 bytes into Solab request: len={}", b127.length);
@@ -446,7 +439,6 @@ public class IsoTcpServer {
                                 }
                             }
 
-                            // Fallback: use inbound composite 127
                             if (!attached127 && inbound127 != null) {
                                 try {
                                     if (inbound127.getFieldNumber() != 127) inbound127.setFieldNumber(127);
@@ -466,7 +458,6 @@ public class IsoTcpServer {
                                 }
                             }
 
-                            // Outbound full dump + 127 preview
                             try {
                                 ByteArrayOutputStream bosOut = new ByteArrayOutputStream();
                                 PrintStream psOut = new PrintStream(bosOut);
@@ -572,6 +563,10 @@ public class IsoTcpServer {
         for (Map.Entry<Integer, Integer> e : llnumMax.entrySet()) {
             int fld = e.getKey();
             int maxLen = e.getValue();
+
+            // Preserve Track-2 sentinel ‘D’/’=’ in field 35
+            if (fld == 35) continue;
+
             try {
                 if (fld == 70) continue;
                 if (!msg.hasField(fld)) continue;
@@ -618,7 +613,7 @@ public class IsoTcpServer {
         llnumMax.put(2, 19);
         llnumMax.put(32, 11);
         llnumMax.put(33, 11);
-        llnumMax.put(35, 37);
+        llnumMax.put(35, 37); // kept for semantics; loop skips 35
         llnumMax.put(99, 11);
         llnumMax.put(100, 11);
         llnumMax.put(101, 17);
@@ -656,7 +651,6 @@ public class IsoTcpServer {
         log.info("ISO-8583 TCP server stopped");
     }
 
-    // Safe public-API helper: uses getISOMsgPackager()
     private ISOPackager getF127SubPackager(ISOPackager root) {
         if (!(root instanceof GenericPackager)) return null;
         try {
