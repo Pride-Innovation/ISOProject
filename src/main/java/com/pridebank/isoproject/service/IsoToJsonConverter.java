@@ -200,7 +200,7 @@ public class IsoToJsonConverter {
         if (proc.startsWith("38")) return "MINI_STATEMENT";
 
         // Generic rule
-        if (proc.startsWith("1")) return "DEPOSIT";
+        if (proc.startsWith("21")) return "DEPOSIT";
 
         return "OTHER";
     }
