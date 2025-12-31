@@ -197,7 +197,7 @@ public class IsoToJsonConverter {
     private String transactionTypeFromProc(String proc) {
         if (proc == null || proc.length() < 2) return "UNKNOWN";
 
-        if (proc.startsWith("00")) return "PURCHASE";
+        if (proc.startsWith("00")) return "TRANSFER";
         if (proc.startsWith("01")) return "WITHDRAWAL";
         if (proc.startsWith("03")) return "TRANSFER";
         if (proc.startsWith("31")) return "BALANCE_INQUIRY";
