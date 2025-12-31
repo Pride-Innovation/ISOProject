@@ -118,6 +118,10 @@ public class IsoToJsonConverter {
             json.put("fromAccount", toStringSafe(isoMessage.getObjectValue(102)));
             raw.put("102", toStringSafe(isoMessage.getObjectValue(102)));
         }
+        if (isoMessage.hasField(103)) {
+            json.put("toAccount", toStringSafe(isoMessage.getObjectValue(103)));
+            raw.put("103", toStringSafe(isoMessage.getObjectValue(103)));
+        }
         if (isoMessage.hasField(123)) {
             json.put("privateData", toStringSafe(isoMessage.getObjectValue(123)));
             raw.put("123", toStringSafe(isoMessage.getObjectValue(123)));

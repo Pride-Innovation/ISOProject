@@ -103,7 +103,7 @@ public class JsonToIsoConverter {
         // Balances -> field 54
         if (resp.getAvailableBalance() != null || resp.getLedgerBalance() != null) {
             // choose available if present otherwise ledger, protect against nulls
-            BigDecimal availableBalance = resp.getAvailableBalance() != null ? resp.getAvailableBalance() : (resp.getLedgerBalance() != null ? resp.getLedgerBalance() : BigDecimal.ZERO);
+            BigDecimal availableBalance = resp.getAvailableBalance() != null ? resp.getAvailableBalance() : resp.getLedgerBalance();
             // Round down to whole number for display in field 54
             BigDecimal truncatedBalance = availableBalance.setScale(0, RoundingMode.DOWN);
             log.info("Available Balance ::: {}", truncatedBalance);

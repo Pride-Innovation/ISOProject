@@ -99,9 +99,28 @@ public class EsbGatewayService {
                     Objects.equals(transactionType, "MINI_STATEMENT") ||
                             Objects.equals(transactionType, "BALANCE_INQUIRY")
             ) {
-                request.setAccountNumber(request.getFromAccount());
+                if (request.getFromAccount() != null) {
+                    request.setAccountNumber(request.getFromAccount());
+                } else {
+                    request.setAccountNumber(request.getToAccount());
+                }
 
             }
+
+            if (Objects.equals(transactionType, "DEPOSIT") ||
+                    Objects.equals(transactionType, "WITHDRAWAL") ||
+                    Objects.equals(transactionType, "TRANSFER")
+            ) {
+                SourceDestinationAccounts data = determineSourceAndDestinationAccounts(
+                        transactionType,
+                        request.getFromAccount(),
+                        request.getToAccount()
+                );
+
+                request.setFromAccount(data.getFromAccount());
+                request.setTargetAccount(data.getTargetAccount());
+            }
+
             ResponseEntity<?> response = callESBEndPointBasedOnTransactionType(transactionType, authHeader, request);
 
             // Normalize responses here: accept 2xx or structured error body
@@ -276,5 +295,25 @@ public class EsbGatewayService {
                 .toDate(toDate.format(formatter))
                 .build();
 
+    }
+
+    private SourceDestinationAccounts determineSourceAndDestinationAccounts(
+            String transaction,
+            String fromAccount,
+            String toAccount
+    ) {
+        return SourceDestinationAccounts
+                .builder()
+                .fromAccount(
+                        Objects.equals(transaction, "DEPOSIT") ? "212206047427801" :
+                                Objects.equals(transaction, "WITHDRAWAL") ? fromAccount :
+                                        Objects.equals(transaction, "TRANSFER") ? fromAccount :
+                                                "")
+                .targetAccount(
+                        Objects.equals(transaction, "DEPOSIT") ? toAccount :
+                                Objects.equals(transaction, "WITHDRAWAL") ? "212206047427801" :
+                                        Objects.equals(transaction, "TRANSFER") ? toAccount :
+                                                "")
+                .build();
     }
 }
