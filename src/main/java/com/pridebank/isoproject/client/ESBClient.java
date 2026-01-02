@@ -44,7 +44,7 @@ public interface ESBClient {
      * Forward Transfer POST request to ESB
      */
     @PostMapping(
-            value = "${esb.purchase}",
+            value = "${esb.transfer}",
             consumes = MediaType.APPLICATION_JSON_VALUE,
             produces = MediaType.APPLICATION_JSON_VALUE
     )

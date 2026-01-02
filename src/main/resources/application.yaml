@@ -25,7 +25,7 @@ esb:
   base-url: ${BASE_URL}
   withdrawal: ${WITHDRAWAL}
   deposit: ${DEPOSIT}
-  purchase: ${PURCHASE}
+  transfer: ${TRANSFER}
   balance-inquiry: ${BALANCE_INQUIRY}
   mini-statement: ${MINI_STATEMENT}
   connection-timeout: 60000
