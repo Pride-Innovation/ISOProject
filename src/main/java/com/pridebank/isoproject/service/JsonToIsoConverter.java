@@ -31,15 +31,12 @@ public class JsonToIsoConverter {
 
         String origCode = resp.getResponseCode();
         String code = (origCode == null) ? "96" : origCode.trim();
-        if (!code.matches("\\d{2}")) {
-            code = mapTextToIso39(code);
-        }
+        if (!code.matches("\\d{2}")) code = mapTextToIso39(code);
 
         String auth = resp.getAuthorizationCode() != null && !resp.getAuthorizationCode().isBlank()
                 ? resp.getAuthorizationCode()
                 : resp.getApprovalCode();
 
-        // map system error -> 96 (accept textual SYSTEM_ERROR as well)
         if ("SYSTEM_ERROR".equalsIgnoreCase(origCode) || "96".equals(code)) {
             IsoMessage error = isoMessageBuilder.createResponseFromRequest(request, request.getType() + 0x10);
             error.setValue(39, "96", IsoType.ALPHA, 2);
@@ -48,25 +45,20 @@ public class JsonToIsoConverter {
             return error;
         }
 
-        // Build base response preserving request->response MTI relationship.
-        // Use createResponseFromRequest so reversal responses (0420->0430) are produced correctly.
         IsoMessage response = isoMessageBuilder.createResponseFromRequest(request, request.getType() + 0x10);
 
-        // Ensure response code and auth are set (builder may not set them)
         response.setValue(39, code, IsoType.ALPHA, 2);
         if (auth != null && !auth.isBlank()) {
             String ac = auth.length() > 6 ? auth.substring(0, 6) : String.format("%-6s", auth);
             response.setValue(38, ac, IsoType.ALPHA, 6);
         }
 
-        // RRN -> field 37 (transactionId)
         if (resp.getTransactionId() != null && !resp.getTransactionId().isBlank()) {
             String rrn = resp.getTransactionId();
             if (rrn.length() > 12) rrn = rrn.substring(0, 12);
             response.setValue(37, rrn, IsoType.ALPHA, 12);
         }
 
-        // STAN -> field 11
         if (resp.getStan() != null && !resp.getStan().isBlank()) {
             String stan = resp.getStan().replaceAll("\\D", "");
             if (stan.length() > 6) stan = stan.substring(stan.length() - 6);
@@ -78,7 +70,6 @@ public class JsonToIsoConverter {
             }
         }
 
-        // Amount -> field 4
         String amtMinor = null;
         if (resp.getAmountMinor() != null && !resp.getAmountMinor().isBlank()) {
             amtMinor = digitsOnly(resp.getAmountMinor());
@@ -86,11 +77,10 @@ public class JsonToIsoConverter {
             amtMinor = formatMinor(resp.getAmount());
         }
         if (amtMinor != null && !amtMinor.isBlank()) {
-            if (amtMinor.length() > 12) amtMinor = amtMinor.substring(amtMinor.length() - 12);
+            if (amtMinor.length() > 12) amtMinor = amtMinor.substring(0, 12);
             response.setValue(4, String.format("%012d", Long.parseLong(amtMinor)), IsoType.NUMERIC, 12);
         }
 
-        // Currency -> field 49
         if (resp.getCurrency() != null && !resp.getCurrency().isBlank()) {
             String curr = resp.getCurrency().trim();
             if (curr.matches("\\d+")) {
@@ -100,47 +90,42 @@ public class JsonToIsoConverter {
             }
         }
 
-        // Balances -> field 54
-        if (resp.getAvailableBalance() != null || resp.getLedgerBalance() != null) {
-            // choose available if present otherwise ledger, protect against nulls
-            BigDecimal availableBalance = resp.getAvailableBalance() != null ? resp.getAvailableBalance() : resp.getLedgerBalance();
-            // Round down to whole number for display in field 54
-            BigDecimal truncatedBalance = availableBalance.setScale(0, RoundingMode.DOWN);
-            log.info("Available Balance ::: {}", truncatedBalance);
+        // Field 54: Additional Amounts (always emit ledger + available when at least one is present)
+        BigDecimal ledger = resp.getLedgerBalance();
+        BigDecimal available = resp.getAvailableBalance();
+        if (ledger != null || available != null) {
+            String curr3 = deriveCurrency3(request, resp.getCurrency());
 
-            String bal = formatMinor(truncatedBalance);
-            response.setValue(54, bal, IsoType.LLLVAR, Math.min(bal.length(), 120));
+            // Fallback policy: if one is missing, duplicate the other so both segments are present
+            BigDecimal ledgerUse = (ledger != null) ? ledger : available;
+            BigDecimal availUse = (available != null) ? available : ledger;
+
+            String segLedger = buildSeg("01", curr3, ledgerUse); // 00 acct type + 01 ledger
+            String segAvail = buildSeg("02", curr3, availUse);  // 00 acct type + 02 available
+
+            String content = segLedger + segAvail;               // 40 chars total
+            String capped = content.length() > 120 ? content.substring(0, 120) : content;
+            response.setValue(54, capped, IsoType.LLLVAR, capped.length());
+            log.info("Field 54 formatted: len={} value={}", capped.length(), capped);
         }
 
-        // Mini-statement -> field 48 for ATM ministatement requests, otherwise field 62
-        // Accept either miniStatementText (plain string) or miniStatement (structured list)
         boolean isMiniReq = isMinistatementRequest(request);
         if (resp.getMiniStatementText() != null && !resp.getMiniStatementText().isBlank()) {
             String ms = resp.getMiniStatementText();
-            // Ensure length <= LLLVAR_MAX
             String msTrunc = ms.length() > LLLVAR_MAX ? ms.substring(0, LLLVAR_MAX) : ms;
-            if (isMiniReq) {
-                response.setValue(48, msTrunc, IsoType.LLLVAR, msTrunc.length());
-            } else {
-                response.setValue(62, msTrunc, IsoType.LLLVAR, msTrunc.length());
-            }
+            if (isMiniReq) response.setValue(48, msTrunc, IsoType.LLLVAR, msTrunc.length());
+            else response.setValue(62, msTrunc, IsoType.LLLVAR, msTrunc.length());
         } else if (resp.getMiniStatement() != null && !resp.getMiniStatement().isEmpty()) {
             String msText = buildMiniStatementText(resp.getMiniStatement());
-            // buildMiniStatementText already truncates to LLLVAR_MAX, but be defensive here
             String msTrunc = msText.length() > LLLVAR_MAX ? msText.substring(0, LLLVAR_MAX) : msText;
-            if (isMiniReq) {
-                response.setValue(48, msTrunc, IsoType.LLLVAR, msTrunc.length());
-            } else {
-                response.setValue(62, msTrunc, IsoType.LLLVAR, msTrunc.length());
-            }
+            if (isMiniReq) response.setValue(48, msTrunc, IsoType.LLLVAR, msTrunc.length());
+            else response.setValue(62, msTrunc, IsoType.LLLVAR, msTrunc.length());
         }
 
-        // Message -> field 44
         if (resp.getMessage() != null && !resp.getMessage().isBlank()) {
             response.setValue(44, resp.getMessage(), IsoType.LLVAR, Math.min(resp.getMessage().length(), 25));
         }
 
-        // MAC -> field 64
         if (resp.getMacBase64() != null && !resp.getMacBase64().isBlank()) {
             try {
                 byte[] mac = Base64.getDecoder().decode(resp.getMacBase64());
@@ -155,7 +140,6 @@ public class JsonToIsoConverter {
             }
         }
 
-        // fromAccount -> field 102, toAccount -> field 103
         if (resp.getFromAccount() != null && !resp.getFromAccount().isBlank()) {
             response.setValue(102, resp.getFromAccount(), IsoType.LLVAR, Math.min(resp.getFromAccount().length(), 28));
         }
@@ -163,7 +147,6 @@ public class JsonToIsoConverter {
             response.setValue(103, resp.getToAccount(), IsoType.LLVAR, Math.min(resp.getToAccount().length(), 28));
         }
 
-        // rawFields map -> set by id (string values) unless field already present
         Map<String, String> raw = resp.getRawFields();
         if (raw != null && !raw.isEmpty()) {
             Map<Integer, Map<String, String>> grouped = new HashMap<>();
@@ -192,7 +175,6 @@ public class JsonToIsoConverter {
                             } catch (IllegalArgumentException ignored) {
                             }
                         }
-                        // ensure we never pass a value longer than LLLVAR_MAX
                         String vToSet = val.length() > LLLVAR_MAX ? val.substring(0, LLLVAR_MAX) : val;
                         response.setValue(fid, vToSet, IsoType.LLLVAR, Math.min(vToSet.length(), 999));
                     }
@@ -219,14 +201,11 @@ public class JsonToIsoConverter {
 
     private static String formatMinor(BigDecimal value) {
         if (value == null) return "0";
-
         BigDecimal truncatedValue = value.setScale(0, RoundingMode.DOWN);
         String digits = truncatedValue.toPlainString().replaceAll("\\D", "");
-
         return digits.isEmpty() ? "0" : digits;
     }
 
-    // Build ministatement plain-text lines (max 10 records). Each line: YYYY-MM-DD|Narration|+/-Amount|Balance
     private String buildMiniStatementText(Object miniObj) {
         log.info("Mini Statement :::: {}", miniObj);
         try {
@@ -236,7 +215,6 @@ public class JsonToIsoConverter {
             );
 
             StringBuilder sb = new StringBuilder();
-            // always take up to the first MINI_STATEMENT_MAX_RECORDS items (first are assumed latest)
             int limit = Math.min(MINI_STATEMENT_MAX_RECORDS, list.size());
             for (int i = 0; i < limit; i++) {
                 Map<String, Object> rec = list.get(i);
@@ -283,10 +261,7 @@ public class JsonToIsoConverter {
                 if (i < limit - 1) sb.append("\n");
             }
             String result = sb.toString();
-            // enforce LLLVAR_MAX hard limit
-            if (result.length() > LLLVAR_MAX) {
-                result = result.substring(0, LLLVAR_MAX);
-            }
+            if (result.length() > LLLVAR_MAX) result = result.substring(0, LLLVAR_MAX);
             return result;
         } catch (Exception e) {
             try {
@@ -317,7 +292,6 @@ public class JsonToIsoConverter {
         }
     }
 
-    // Determine if incoming request is a ministatement (proc starting with 32 or 38)
     private boolean isMinistatementRequest(IsoMessage request) {
         if (request == null) return false;
         try {
@@ -326,7 +300,6 @@ public class JsonToIsoConverter {
             try {
                 p = request.getObjectValue(3);
             } catch (Throwable ignore) {
-                // fallback
             }
             if (p == null) {
                 try {
@@ -357,5 +330,42 @@ public class JsonToIsoConverter {
             case "DUPLICATE" -> "94";
             default -> "96";
         };
+    }
+
+    // --- Field 54 helpers ---
+
+    // Prefer ESB currency, else request field 49, else "800" (3-digit numeric)
+    private String deriveCurrency3(IsoMessage request, String respCurrency) {
+        String d = null;
+        if (respCurrency != null && !respCurrency.isBlank()) d = respCurrency.replaceAll("[^0-9]", "");
+        if ((d == null || d.isBlank()) && request != null && request.hasField(49)) {
+            try {
+                Object v = request.getObjectValue(49);
+                if (v == null) {
+                    IsoValue<?> iv = request.getField(49);
+                    if (iv != null) v = iv.getValue();
+                }
+                if (v != null) d = v.toString().replaceAll("[^0-9]", "");
+            } catch (Throwable ignore) {
+            }
+        }
+        if (d == null || d.isBlank()) d = "800";
+        if (d.length() >= 3) return d.substring(0, 3);
+        return String.format("%03d", Integer.parseInt(d));
+    }
+
+    // Amount to 12 digits (abs, drop decimals, cap last 12, left-pad)
+    private static String fmt12(BigDecimal value) {
+        BigDecimal v = (value == null) ? BigDecimal.ZERO : value.abs().setScale(0, RoundingMode.DOWN);
+        String digits = v.toPlainString().replaceAll("\\D", "");
+        if (digits.isEmpty()) digits = "0";
+        if (digits.length() > 12) digits = digits.substring(digits.length() - 12);
+        return String.format("%012d", Long.parseLong(digits));
+    }
+
+    // 20-char segment: 1-2 acctType=00, 3-4 amtType, 5-7 currency, 8 sign, 9-20 amount(12)
+    private static String buildSeg(String amtType, String curr3, BigDecimal value) {
+        char sign = (value != null && value.signum() < 0) ? 'D' : 'C';
+        return "00" + amtType + curr3 + sign + fmt12(value);
     }
 }

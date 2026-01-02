@@ -43,6 +43,7 @@ public class EsbGatewayService {
         try {
 
             log.info("Iso Message ::: {}", isoMessage);
+            log.info("Request Body ::: {}", jsonRequest);
             String authHeader = createBasicAuthHeader(atmUsername, atmPassword);
             AtmTransactionRequest request = objectMapper.readValue(jsonRequest, AtmTransactionRequest.class);
             String transactionType = request.getTransactionType();
@@ -109,7 +110,7 @@ public class EsbGatewayService {
 
             if (Objects.equals(transactionType, "DEPOSIT") ||
                     Objects.equals(transactionType, "WITHDRAWAL") ||
-                    Objects.equals(transactionType, "TRANSFER")
+                    Objects.equals(transactionType, "PURCHASE")
             ) {
                 SourceDestinationAccounts data = determineSourceAndDestinationAccounts(
                         transactionType,
@@ -212,7 +213,7 @@ public class EsbGatewayService {
     ) {
         return transactionType.equals("WITHDRAWAL") ? esbClient.WithdrawalRequestPostRequest(authHeader, request) :
                 transactionType.equals("DEPOSIT") ? esbClient.DepositRequestPostRequest(authHeader, request) :
-                        transactionType.equals("TRANSFER") ? esbClient.TransferRequestPostRequest(authHeader, request) :
+                        transactionType.equals("PURCHASE") ? esbClient.PurchaseRequestPostRequest(authHeader, request) :
                                 transactionType.equals("BALANCE_INQUIRY") ? esbClient.BalanceInquiryRequestPostRequest(authHeader, request) :
                                         transactionType.equals("MINI_STATEMENT") ? esbClient.MiniStatementRequestPostRequest(authHeader, request) : null;
     }
@@ -307,12 +308,12 @@ public class EsbGatewayService {
                 .fromAccount(
                         Objects.equals(transaction, "DEPOSIT") ? "212206047427801" :
                                 Objects.equals(transaction, "WITHDRAWAL") ? fromAccount :
-                                        Objects.equals(transaction, "TRANSFER") ? fromAccount :
+                                        Objects.equals(transaction, "PURCHASE") ? fromAccount :
                                                 "")
                 .targetAccount(
                         Objects.equals(transaction, "DEPOSIT") ? toAccount :
                                 Objects.equals(transaction, "WITHDRAWAL") ? "212206047427801" :
-                                        Objects.equals(transaction, "TRANSFER") ? toAccount :
+                                        Objects.equals(transaction, "PURCHASE") ? toAccount :
                                                 "")
                 .build();
     }
