@@ -125,7 +125,7 @@ public class AtmTransactionProcessor {
             }
 
             String jsonRequest = isoToJsonConverter.convert(isoRequest);
-            log.debug("Request JSON sent to ESB: {}", jsonRequest);
+            log.info("Request JSON sent to ESB: {}", jsonRequest);
             String jsonResponse = esbGatewayService.sendToEsb(jsonRequest, isoRequest);
 
             IsoMessage esbIsoResp = jsonToIsoConverter.convert(jsonResponse, isoRequest);
