@@ -213,57 +213,43 @@ public class JsonToIsoConverter {
                     miniObj,
                     objectMapper.getTypeFactory().constructCollectionType(List.class, Map.class)
             );
+            int limit = Math.min(MINI_STATEMENT_MAX_RECORDS, list.size());
 
             StringBuilder sb = new StringBuilder();
-            int limit = Math.min(MINI_STATEMENT_MAX_RECORDS, list.size());
+            // Header + trailing tilde as per switch example
+            sb.append("DATE_TIME|TRAN_AMOUNT|TRAN_TYPE|CURR_CODE~");
+
             for (int i = 0; i < limit; i++) {
                 Map<String, Object> rec = list.get(i);
-                String date = firstNonNullString(rec, "date", "transactionDate", "tranDate", "txnDate");
-                String narration = firstNonNullString(rec, "narration", "description");
-                String amount = firstNonNullString(rec, "amount", "txnAmount", "amt");
-                String balance = firstNonNullString(rec, "balance", "availableBalance", "bal");
-                String drCrFlag = firstNonNullString(rec, "drCrFlag");
-                String contraAccount = firstNonNullString(rec, "contraAccount");
-                String account = firstNonNullString(rec, "account");
-                String internalRef = firstNonNullString(rec, "internalRef");
-                String currency = firstNonNullString(rec, "currency");
 
-                if (date == null) date = "";
-                if (narration == null) narration = "";
-                if (amount == null) amount = "";
-                if (balance == null) balance = "";
-                if (drCrFlag == null) drCrFlag = "";
-                if (contraAccount == null) contraAccount = "";
-                if (account == null) account = "";
-                if (internalRef == null) internalRef = "";
-                if (currency == null) currency = "";
+                String dateRaw = firstNonNullString(rec, "dateTime", "date", "transactionDate", "tranDate", "txnDate");
+                String dt = toYyyyMMddHHmmss(dateRaw); // yyyyMMddHHmmss (default HHmmss=000000)
 
-                amount = normalizeAmountString(amount);
-                balance = normalizeAmountString(balance);
+                String amountRaw = firstNonNullString(rec, "amount", "txnAmount", "amt");
+                String amt12 = toMinor12(amountRaw);
 
-                sb.append(date)
-                        .append("|")
-                        .append(narration)
-                        .append("|")
-                        .append(amount)
-                        .append("|")
-                        .append(balance)
-                        .append("|")
-                        .append(drCrFlag)
-                        .append("|")
-                        .append(contraAccount)
-                        .append("|")
-                        .append(account)
-                        .append("|")
-                        .append(internalRef)
-                        .append("|")
-                        .append(currency);
-                if (i < limit - 1) sb.append("\n");
+                String dcRaw = firstNonNullString(rec, "drCrFlag");
+                String dc = toDebitCreditFlag(dcRaw, amountRaw); // "D" or "C"
+
+                String typeCode = "001 CSH"; // make configurable if needed
+                String tranType = typeCode + " " + dc;
+
+                String currRaw = firstNonNullString(rec, "currency");
+                String curr3 = toCurrencyNumeric3(currRaw);
+
+                sb.append(dt).append("|")
+                        .append(amt12).append("|")
+                        .append(tranType).append("|")
+                        .append(curr3).append("~");
+
+                if (sb.length() >= LLLVAR_MAX) break;
             }
+
             String result = sb.toString();
             if (result.length() > LLLVAR_MAX) result = result.substring(0, LLLVAR_MAX);
             return result;
         } catch (Exception e) {
+            // Fallback: serialize whatever we got (still capped)
             try {
                 String json = objectMapper.writeValueAsString(miniObj);
                 return json.length() > LLLVAR_MAX ? json.substring(0, LLLVAR_MAX) : json;
@@ -271,6 +257,88 @@ public class JsonToIsoConverter {
                 return "";
             }
         }
+    }
+
+    private static String toDebitCreditFlag(String dcRaw, String amountRaw) {
+        if (dcRaw != null && !dcRaw.isBlank()) {
+            String f = dcRaw.trim().toUpperCase();
+            if (f.startsWith("D")) return "D";
+            if (f.startsWith("C")) return "C";
+        }
+        // Fallback by sign
+        try {
+            BigDecimal bd = new BigDecimal(amountRaw.replaceAll("[^0-9\\-.]", ""));
+            return bd.signum() < 0 ? "D" : "C";
+        } catch (Exception ignore) {
+            return "D";
+        }
+    }
+
+
+    private static String toYyyyMMddHHmmss(String input) {
+        if (input == null || input.isBlank()) return "19700101000000";
+        String s = input.trim();
+        // dd/MM/yyyy → yyyyMMdd000000
+        try {
+            if (s.matches("\\d{2}/\\d{2}/\\d{4}")) {
+                String dd = s.substring(0, 2);
+                String MM = s.substring(3, 5);
+                String yyyy = s.substring(6, 10);
+                return yyyy + MM + dd + "000000";
+            }
+        } catch (Exception ignore) {
+        }
+        // yyyy-MM-ddTHH:mm:ss → yyyyMMddHHmmss
+        try {
+            if (s.matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*")) {
+                String yyyy = s.substring(0, 4);
+                String MM = s.substring(5, 7);
+                String dd = s.substring(8, 10);
+                String HH = s.substring(11, 13);
+                String mm = s.substring(14, 16);
+                String ss = s.substring(17, 19);
+                return yyyy + MM + dd + HH + mm + ss;
+            }
+        } catch (Exception ignore) {
+        }
+        // Compact digits yyyyMMdd[HHmmss]
+        String digits = s.replaceAll("\\D", "");
+        if (digits.length() >= 14) return digits.substring(0, 14);
+        if (digits.length() == 8) return digits + "000000";
+        // Last resort
+        return "19700101000000";
+    }
+
+
+    private static String toMinor12(String amountRaw) {
+        if (amountRaw == null || amountRaw.isBlank()) return "000000000000";
+        try {
+            BigDecimal bd = new BigDecimal(amountRaw.replaceAll("[^0-9\\-.]", ""));
+            bd = bd.setScale(2, RoundingMode.HALF_UP).movePointRight(2).abs();
+            String d = bd.toPlainString().replaceAll("\\D", "");
+            if (d.length() > 12) d = d.substring(d.length() - 12);
+            return String.format("%012d", Long.parseLong(d));
+        } catch (Exception e) {
+            return "000000000000";
+        }
+    }
+
+    private static String toCurrencyNumeric3(String currRaw) {
+        if (currRaw == null || currRaw.isBlank()) return "800";
+        String s = currRaw.trim();
+        if (s.matches("\\d{3}")) return s;
+        String up = s.toUpperCase();
+        return switch (up) {
+            case "UGX" -> "800";
+            case "KES" -> "404";
+            case "TZS" -> "834";
+            case "RWF" -> "646";
+            case "USD" -> "840";
+            case "EUR" -> "978";
+            case "GBP" -> "826";
+            case "ZMW" -> "967";
+            default -> "800";
+        };
     }
 
     private static String firstNonNullString(Map<String, Object> m, String... keys) {
