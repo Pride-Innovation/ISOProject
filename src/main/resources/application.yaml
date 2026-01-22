@@ -25,15 +25,32 @@ esb:
   base-url: ${BASE_URL}
   withdrawal: ${WITHDRAWAL}
   deposit: ${DEPOSIT}
-  transfer: ${TRANSFER}
+  purchase: ${PURCHASE}
   balance-inquiry: ${BALANCE_INQUIRY}
   mini-statement: ${MINI_STATEMENT}
+  inter-switch-settlement-account: ${INTER_SWITCH_SETTLEMENT_ACCOUNT}
+  tax-account: ${TAX_COLLECTION_ACCOUNT}
+  pride-charge-account: ${PRIDE_CHARGE_COLLECTION_ACCOUNT}
+  inter-switch-charge-account: ${INTER_SWITCH_CHARGE_COLLECTION_ACCOUNT}
+  inter-switch-commissions-account: ${INTER_SWITCH_COMMISSION_COLLECTION_ACCOUNT}
+  pride-commissions-settlement-account: ${PRIDE_COMMISSION_SETTLEMENT_ACCOUNT}
   connection-timeout: 60000
   read-timeout: 60000
   username: ${ESB_USERNAME}
   password: ${ESB_PASSWORD}
   ssl:
     verify: ${ESB_SSL_VERIFY:false}
+  charges:
+    excise:
+      rate: ${ESB_CHARGES_EXCISE_RATE}           # e.g., 0.15 for 15%
+    base:
+      initial: ${ESB_CHARGES_BASE_INITIAL}     # first band charge (≤ 500k)
+      band-size: ${ESB_CHARGES_BASE_BAND_SIZE}
+      increment: ${ESB_CHARGES_BASE_INCREMENT} # +1,000 per extra 500k
+    pride:
+      share-percent: ${ESB_CHARGES_PRIDE_SHARE_PERCENT} # 20%
+    inter-switch:
+      commission: ${INTER_SWITCH_COMMISSIONS}
 
   codes:
     SUCCESS: "00"
