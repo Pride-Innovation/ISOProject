@@ -33,66 +33,64 @@ public class EsbGatewayService {
     private String atmPassword;
 
     @Value("${esb.inter-switch-settlement-account}")
-    private String interSwitchSettlementAccount; // Inter-switch settlement account
+    private String interSwitchSettlementAccount;
 
     @Value("${esb.tax-account}")
-    private String taxAccount; // Transaction Tax (Excise Duty)
+    private String taxAccount;
 
     @Value("${esb.pride-charge-account}")
-    private String prideChargeCollectionAccount; // Pride Transaction charge
+    private String prideChargeCollectionAccount;
 
     @Value("${esb.inter-switch-charge-account}")
-    private String interSwitchChargeCollectionAccount; // Inter switch Charge Account
+    private String interSwitchChargeCollectionAccount;
 
     @Value("${esb.inter-switch-commissions-account}")
-    private String interSwitchCommissionsAccount; // Inter switch commissions Account
+    private String interSwitchCommissionsAccount;
 
     @Value("${esb.pride-commissions-settlement-account}")
     private String prideCommissionsSettlementAccount;
 
-    // Charging scheme config
     @Value("${esb.charges.excise.rate:0}")
-    private BigDecimal exciseDutyRate; // e.g., 0.15 for 15% of total charge
+    private BigDecimal exciseDutyRate;
 
     @Value("${esb.charges.base.initial:2500}")
-    private BigDecimal baseChargeInitial; // first band charge (≤ 500k)
+    private BigDecimal baseChargeInitial;
 
     @Value("${esb.charges.base.band-size:500000}")
-    private BigDecimal chargeBandSize; // 500k per band
+    private BigDecimal chargeBandSize;
 
     @Value("${esb.charges.base.increment:1000}")
-    private BigDecimal chargeBandIncrement; // +1,000 per band beyond first
+    private BigDecimal chargeBandIncrement;
 
     @Value("${esb.charges.pride.share-percent:0.20}")
-    private BigDecimal prideSharePercent; // Pride receives 20% of base charge
+    private BigDecimal prideSharePercent;
 
     @Value("${esb.charges.inter-switch.commission:0}")
-    private BigDecimal interSwitchCommission; // Commission (not part of fee split)
+    private BigDecimal interSwitchCommission;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    // transaction limit (major units)
     private static final BigDecimal TRANSACTION_LIMIT_MAJOR = new BigDecimal("5000000");
     private static final BigDecimal HUNDRED = BigDecimal.valueOf(100);
-    private static final BigDecimal TRANSACTION_LIMIT_MINOR = TRANSACTION_LIMIT_MAJOR.multiply(HUNDRED);
 
     public String sendToEsb(String jsonRequest, IsoMessage isoMessage) {
         try {
-
             log.info("Iso Message ::: {}", isoMessage);
             log.info("Request Body ::: {}", jsonRequest);
+
             String authHeader = createBasicAuthHeader(atmUsername, atmPassword);
             AtmTransactionRequest request = objectMapper.readValue(jsonRequest, AtmTransactionRequest.class);
             String transactionType = request.getTransactionType();
             log.info("Request Transaction Type ::: {}", transactionType);
             log.info("Account Number ::: {}", request.getFromAccount());
 
-            // ---- pre-check: transaction limit ----
+            String currencyCode = extractCurrencyCode(isoMessage);
+
             try {
-                BigDecimal amountMinor = getBigDecimal(request);
-                if (amountMinor != null && amountMinor.compareTo(TRANSACTION_LIMIT_MINOR) > 0) {
-                    log.info("Transaction amount {} (minor) exceeds limit {} (minor) - short-circuiting ESB call",
-                            amountMinor, TRANSACTION_LIMIT_MINOR);
+                BigDecimal amountMajor = getAmountMajor(request, currencyCode);
+                if (amountMajor != null && amountMajor.compareTo(TRANSACTION_LIMIT_MAJOR) > 0) {
+                    log.info("Transaction amount {} (major) exceeds limit {} (major) - short-circuiting ESB call",
+                            amountMajor, TRANSACTION_LIMIT_MAJOR);
                     AtmTransactionResponse atmResp = AtmTransactionResponse.builder()
                             .responseCode("EXCEEDS_LIMIT")
                             .message("Transaction amount exceeds allowed limit")
@@ -107,19 +105,12 @@ public class EsbGatewayService {
             String externalReference = generateExternalReference();
             request.setExternalRef(externalReference);
 
-            // Build charges (Excise Duty + Pride + InterSwitch) for financial transactions
-            request.setCharges(buildTransactionCharges(transactionType, request));
+            request.setCharges(buildTransactionCharges(transactionType, request, currencyCode));
 
-            /*
-                Add Commissions for deposits requests
-             */
             if (Objects.equals(transactionType, "DEPOSIT")) {
                 request.setCommission(processTransactionCommission(externalReference));
             }
 
-            /*
-                Add Date ranges for mini statement
-             */
             if (Objects.equals(transactionType, "MINI_STATEMENT")) {
                 MinistatementDates dates = generateStartEndDatesForMinistatement();
                 request.setFromDate(dates.getFromDate());
@@ -147,7 +138,8 @@ public class EsbGatewayService {
                 request.setTargetAccount(data.getTargetAccount());
             }
 
-            ResponseEntity<?> response = callESBEndPointBasedOnTransactionType(transactionType, authHeader, request);
+            ResponseEntity<?> response = null;
+//            ResponseEntity<?> response = callESBEndPointBasedOnTransactionType(transactionType, authHeader, request);
 
             Object body = response != null ? response.getBody() : null;
             if (response == null) {
@@ -179,7 +171,7 @@ public class EsbGatewayService {
 
             atmResp.setResponseCode(normalizeResponseCode(atmResp.getResponseCode()));
             if (atmResp.getAmountMinor() == null && atmResp.getAmount() != null) {
-                atmResp.setAmountMinor(formatMinorForService(atmResp.getAmount()));
+                atmResp.setAmountMinor(formatMinorForService(atmResp.getAmount(), currencyCode));
             }
 
             return objectMapper.writeValueAsString(atmResp);
@@ -190,11 +182,43 @@ public class EsbGatewayService {
         }
     }
 
-    private static BigDecimal getBigDecimal(AtmTransactionRequest request) {
+    private String extractCurrencyCode(IsoMessage isoMessage) {
+        try {
+            if (isoMessage != null && isoMessage.hasField(49)) {
+                Object v49 = isoMessage.getObjectValue(49);
+                return v49 != null ? v49.toString().trim() : null;
+            }
+        } catch (Exception ignore) {
+        }
+        return null;
+    }
+
+    private boolean isUgxCurrency(String code) {
+        if (code == null) return false;
+        String s = code.trim();
+        return "800".equals(s) || "UGX".equalsIgnoreCase(s);
+    }
+
+    private BigDecimal getAmountMajor(AtmTransactionRequest request, String currencyCode) {
+        if (request.getAmount() != null) return request.getAmount();
+        if (request.getAmountMinor() != null && !request.getAmountMinor().isBlank()) {
+            String digits = request.getAmountMinor().replaceAll("[^0-9]", "");
+            if (!digits.isEmpty()) {
+                return isUgxCurrency(currencyCode)
+                        ? new BigDecimal(digits).setScale(0, RoundingMode.HALF_UP)
+                        : new BigDecimal(digits).movePointLeft(2);
+            }
+        }
+        return BigDecimal.ZERO;
+    }
+
+    private BigDecimal getAmountMinor(AtmTransactionRequest request, String currencyCode) {
         log.info("Request Amount ::: {}", request.getAmount());
         BigDecimal amountMinor = null;
         if (request.getAmount() != null) {
-            amountMinor = request.getAmount().multiply(HUNDRED).setScale(0, RoundingMode.HALF_UP);
+            amountMinor = isUgxCurrency(currencyCode)
+                    ? request.getAmount().setScale(0, RoundingMode.HALF_UP)
+                    : request.getAmount().multiply(HUNDRED).setScale(0, RoundingMode.HALF_UP);
         } else if (request.getAmountMinor() != null && !request.getAmountMinor().isBlank()) {
             String digits = request.getAmountMinor().replaceAll("[^0-9]", "");
             if (!digits.isEmpty()) amountMinor = new BigDecimal(digits);
@@ -232,9 +256,6 @@ public class EsbGatewayService {
                                         transactionType.equals("MINI_STATEMENT") ? esbClient.MiniStatementRequestPostRequest(authHeader, request) : null;
     }
 
-    /**
-     * Map common ESB textual codes to ISO39 numeric codes (2-char). If already numeric return as-is.
-     */
     private String normalizeResponseCode(String code) {
         if (code == null) return "96";
         String c = code.trim();
@@ -251,9 +272,11 @@ public class EsbGatewayService {
         };
     }
 
-    private String formatMinorForService(BigDecimal value) {
+    private String formatMinorForService(BigDecimal value, String currencyCode) {
         if (value == null) return "0";
-        BigDecimal minor = value.movePointRight(2).setScale(0, java.math.RoundingMode.HALF_UP);
+        BigDecimal minor = isUgxCurrency(currencyCode)
+                ? value.setScale(0, RoundingMode.HALF_UP)
+                : value.movePointRight(2).setScale(0, RoundingMode.HALF_UP);
         return minor.toPlainString().replaceAll("\\D", "");
     }
 
@@ -269,29 +292,22 @@ public class EsbGatewayService {
     private String generateRandomLetters() {
         StringBuilder sb = new StringBuilder(5);
         for (int i = 0; i < 5; i++) {
-            char randomChar = (char) ('A' + random.nextInt(26)); // Random char between A-Z
+            char randomChar = (char) ('A' + random.nextInt(26));
             sb.append(randomChar);
         }
         return sb.toString();
     }
 
-    /*
-     * Charges: Excise Duty (on total charge), Pride (20% of base), InterSwitch (80% of base)
-     * Applies only to DEPOSIT/WITHDRAWAL/PURCHASE; returns empty list for inquiries.
-     */
-    private List<Charge> buildTransactionCharges(String transactionType, AtmTransactionRequest request) {
+    private List<Charge> buildTransactionCharges(String transactionType, AtmTransactionRequest request, String currencyCode) {
         if (!Arrays.asList("DEPOSIT", "WITHDRAWAL", "PURCHASE").contains(transactionType)) {
             return Collections.emptyList();
         }
 
-        BigDecimal baseAmount = amountFromRequest(request); // major units
-        BigDecimal baseCharge = calculateBaseCharge(baseAmount); // whole UGX
+        BigDecimal baseAmount = getAmountMajor(request, currencyCode);
+        BigDecimal baseCharge = calculateBaseCharge(baseAmount);
 
-        // Split base charge
         BigDecimal prideFee = baseCharge.multiply(prideSharePercent).setScale(0, RoundingMode.HALF_UP);
         BigDecimal interSwitchFee = baseCharge.subtract(prideFee).setScale(0, RoundingMode.HALF_UP);
-
-        // Excise duty on TOTAL CHARGE (baseCharge), not on amount
         BigDecimal exciseAmount = baseCharge.multiply(exciseDutyRate).setScale(0, RoundingMode.HALF_UP);
 
         List<Charge> charges = new ArrayList<>();
@@ -326,24 +342,13 @@ public class EsbGatewayService {
     private BigDecimal calculateBaseCharge(BigDecimal amountMajor) {
         if (amountMajor == null) return baseChargeInitial;
 
-        // ≤ first band: initial charge
         if (amountMajor.compareTo(chargeBandSize) <= 0) {
             return baseChargeInitial;
         }
 
-        // Bands beyond first: ceil((amount - bandSize) / bandSize)
         BigDecimal over = amountMajor.subtract(chargeBandSize);
         BigDecimal bandsBeyondFirst = over.divide(chargeBandSize, 0, RoundingMode.CEILING);
         return baseChargeInitial.add(chargeBandIncrement.multiply(bandsBeyondFirst));
-    }
-
-    private BigDecimal amountFromRequest(AtmTransactionRequest request) {
-        if (request.getAmount() != null) return request.getAmount();
-        if (request.getAmountMinor() != null && !request.getAmountMinor().isBlank()) {
-            String digits = request.getAmountMinor().replaceAll("[^0-9]", "");
-            if (!digits.isEmpty()) return new BigDecimal(digits).movePointLeft(2);
-        }
-        return BigDecimal.ZERO;
     }
 
     private Commission processTransactionCommission(String externalReference) {

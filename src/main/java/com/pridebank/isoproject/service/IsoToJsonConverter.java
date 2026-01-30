@@ -39,8 +39,10 @@ public class IsoToJsonConverter {
         }
         if (isoMessage.hasField(4)) {
             String amountStr = toStringSafe(isoMessage.getObjectValue(4));
-            // Prefer sending minor units to ESB to avoid rounding ambiguity
-            json.put("amountMinor", amountStr);
+            log.info("Transaction amount ::: {}", amountStr);
+            raw.put("4", amountStr);
+
+            // Major units for display (switch encoding uses 2 implied decimals)
             try {
                 BigDecimal major = parseAmountToMajor(amountStr);
                 json.put("amount", major.toPlainString());        // major units decimal string
@@ -48,7 +50,34 @@ public class IsoToJsonConverter {
             } catch (Exception ex) {
                 log.debug("Unable to parse amountMinor to major: {}", amountStr, ex);
             }
-            raw.put("4", amountStr);
+
+            // Determine currency (only for normalization logic; JSON for 49 still set below)
+            String currencyCodeForF4 = null;
+            try {
+                if (isoMessage.hasField(49)) {
+                    Object v49 = isoMessage.getObjectValue(49);
+                    currencyCodeForF4 = toStringSafe(v49);
+                }
+            } catch (Exception ignore) {
+            }
+
+            // Prefer sending minor units to ESB; normalize for UGX (exponent 0) by trimming two trailing zeros
+            String amountMinorNormalized = amountStr;
+            try {
+                String digits = amountStr == null ? "" : amountStr.replaceAll("\\D", "");
+                if (isUgx(currencyCodeForF4)) {
+                    if (digits.length() >= 2) {
+                        amountMinorNormalized = digits.substring(0, digits.length() - 2); // e.g., 2000000 -> 20000
+                    } else {
+                        amountMinorNormalized = "0";
+                    }
+                } else {
+                    amountMinorNormalized = digits.isEmpty() ? "0" : digits;
+                }
+            } catch (Exception ignore) {
+                amountMinorNormalized = amountStr;
+            }
+            json.put("amountMinor", amountMinorNormalized);
         }
         if (isoMessage.hasField(7)) {
             Object v = isoMessage.getObjectValue(7);
@@ -157,6 +186,13 @@ public class IsoToJsonConverter {
         if (amountStr == null || amountStr.isBlank()) return BigDecimal.ZERO;
         long cents = Long.parseLong(amountStr.trim());
         return BigDecimal.valueOf(cents).movePointLeft(2);
+    }
+
+    // UGX detection used only for field 4 normalization
+    private boolean isUgx(String currencyCode) {
+        if (currencyCode == null) return false;
+        String s = currencyCode.trim();
+        return "800".equals(s) || "UGX".equalsIgnoreCase(s);
     }
 
     private String maskPan(String pan) {
